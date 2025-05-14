@@ -105,6 +105,8 @@ class MyTeamAgent(AutonomousAgent):
                 "steer":controls.steer, 
                 "throttle":controls.throttle, 
                 "brake": controls.brake,
+                "target_speed": self.configs["target_speed"],
+                "current_speed": input_data["Speed"][1]["speed"] * 3.6,
                 })
             if len(self.configs["SaveSpeedData"]) > 0:
                 with open("/workspace/team_code/BehaviorAgent/"+self.configs["SaveSpeedData"],"a") as fp:
