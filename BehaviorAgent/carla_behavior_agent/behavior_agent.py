@@ -259,6 +259,10 @@ class BehaviorAgent(BasicAgent):
         # 2.1: Pedestrian avoidance behaviors
         walker_state, walker, w_distance = self.pedestrian_avoid_manager(ego_vehicle_wp)
 
+        # 2.1.1: Static obstacle avoidance
+        if self.static_obstacle_avoid_manager(ego_vehicle_wp):
+            return self.emergency_stop()
+
         if walker_state:
             # Distance is computed from the center of the two cars,
             # we use bounding boxes to calculate the actual distance
@@ -316,3 +320,24 @@ class BehaviorAgent(BasicAgent):
         control.brake = self._max_brake
         control.hand_brake = False
         return control
+
+    def static_obstacle_avoid_manager(self, waypoint):
+        """
+        Gestisce ostacoli statici come segnali luminosi per lavori in corso.
+        
+        :param waypoint: waypoint corrente del veicolo
+        :return: True se c'è un ostacolo statico da evitare, altrimenti False
+        """
+        props = self._world.get_actors().filter("*static.prop*")
+        def dist(p): return p.get_location().distance(waypoint.transform.location)
+        props = [p for p in props if dist(p) < 15]
+
+        for prop in props:
+            loc = prop.get_location()
+            ego_loc = self._vehicle.get_location()
+            distance = loc.distance(ego_loc)
+
+            if distance < self._behavior.braking_distance:
+                return True
+
+        return False

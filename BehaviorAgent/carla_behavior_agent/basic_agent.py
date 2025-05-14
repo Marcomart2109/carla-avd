@@ -54,11 +54,13 @@ class BasicAgent(object):
         self._ignore_traffic_lights = False
         self._ignore_stop_signs = False
         self._ignore_vehicles = False
+        self._ignore_obstacles = False
         self._use_bbs_detection = False
         self._target_speed = 5.0
         self._sampling_resolution = 2.0
         self._base_tlight_threshold = 5.0  # meters
         self._base_vehicle_threshold = 5.0  # meters
+        self._base_static_obstacle_threshold = 5.0  # meters
         self._speed_ratio = 1
         self._max_brake = 0.5
         self._offset = 0
@@ -195,6 +197,7 @@ class BasicAgent(object):
         #####
         # Basic Agent :
         vehicle_list = self._world.get_actors().filter("*vehicle*")
+        static_obstacle_list = self._world.get_actors().filter("static.prop.*")
         ### 
 
         vehicle_speed = get_speed(self._vehicle) / 3.6
@@ -203,6 +206,12 @@ class BasicAgent(object):
         max_vehicle_distance = self._base_vehicle_threshold + self._speed_ratio * vehicle_speed
         affected_by_vehicle, _, _ = self._vehicle_obstacle_detected(vehicle_list, max_vehicle_distance)
         if affected_by_vehicle:
+            hazard_detected = True
+
+        # Check for possible static obstacles
+        max_static_obstacle_distance = self._base_static_obstacle_threshold + self._speed_ratio * vehicle_speed
+        affected_by_static_obstacle, _ = self._static_obstacle_detected(static_obstacle_list, max_static_obstacle_distance)
+        if affected_by_static_obstacle:
             hazard_detected = True
 
         # Check if the vehicle is affected by a red traffic light
@@ -601,3 +610,95 @@ class BasicAgent(object):
             plan.append((next_wp, RoadOption.LANEFOLLOW))
 
         return plan
+
+def _get_route_polygon(self, max_distance=None):
+    """
+    Crea un poligono che rappresenta il percorso del veicolo basato sui waypoint seguiti
+    dal piano di navigazione.
+
+    :param max_distance: distanza massima per cui generare il percorso.
+    :return: un poligono che rappresenta il percorso del veicolo.
+    """
+    if not max_distance:
+        max_distance = self._base_vehicle_threshold  # Usa una soglia predefinita se max_distance è None
+
+    route_bb = []
+    ego_transform = self._vehicle.get_transform()
+    ego_location = ego_transform.location
+    extent_y = self._vehicle.bounding_box.extent.y  # Estensione lungo l'asse y della bounding box
+    r_ext = extent_y + self._offset  # Distanza a destra
+    l_ext = -extent_y + self._offset  # Distanza a sinistra
+    r_vec = ego_transform.get_right_vector()  # Vettore di direzione verso destra
+
+    # Aggiungi i punti iniziali per il poligono del percorso
+    p1 = ego_location + carla.Location(r_ext * r_vec.x, r_ext * r_vec.y)
+    p2 = ego_location + carla.Location(l_ext * r_vec.x, l_ext * r_vec.y)
+    route_bb.extend([[p1.x, p1.y, p1.z], [p2.x, p2.y, p2.z]])
+
+    # Aggiungi i waypoint del piano di navigazione al percorso, limitato dalla distanza massima
+    for wp, _ in self._local_planner.get_plan():
+        if ego_location.distance(wp.transform.location) > max_distance:
+            break  # Interrompi il percorso se è oltre la distanza massima
+
+        r_vec = wp.transform.get_right_vector()  # Vettore di direzione a destra del waypoint
+        p1 = wp.transform.location + carla.Location(r_ext * r_vec.x, r_ext * r_vec.y)
+        p2 = wp.transform.location + carla.Location(l_ext * r_vec.x, l_ext * r_vec.y)
+        route_bb.extend([[p1.x, p1.y, p1.z], [p2.x, p2.y, p2.z]])
+
+    # Se ci sono meno di 3 punti, non possiamo creare un poligono valido
+    if len(route_bb) < 3:
+        return None
+
+    return Polygon(route_bb)  # Crea un poligono usando i punti raccolti
+
+def _static_obstacle_detected(self, static_obstacle_list=None, max_distance=None, up_angle_th=90, low_angle_th=0, lane_offset=0):
+        """
+        Method to check if there is a static obstacle in front of the agent blocking its path.
+
+            :param static_obstacle_list: list contatining static objects like roadwork signs or barriers within the planned path.
+                If None, all obstacles in the scene are used
+            :param max_distance: max freespace to check for static obstacles.
+                If None, the base threshold value is used
+        """
+        if self._ignore_obstacles:
+            return (False, None)
+
+        if not static_obstacle_list:
+            static_obstacle_list = self._world.get_actors().filter("static.prop.*")
+
+        if not max_distance:
+            max_distance = self._base_static_obstacle_threshold
+
+        ego_transform = self._vehicle.get_transform()
+        ego_wpt = self._map.get_waypoint(self._vehicle.get_location())
+
+        # Get the right offset
+        if ego_wpt.lane_id < 0 and lane_offset != 0:
+            lane_offset *= -1
+
+        # Get the transform of the front of the ego
+        ego_forward_vector = ego_transform.get_forward_vector()
+        ego_extent = self._vehicle.bounding_box.extent.x
+        ego_front_transform = ego_transform
+        ego_front_transform.location += carla.Location(
+            x=ego_extent * ego_forward_vector.x,
+            y=ego_extent * ego_forward_vector.y,
+        )
+
+        # Ottieni il poligono del percorso del veicolo
+        route_polygon = self._get_route_polygon(max_distance)
+        if not route_polygon:
+            return (False, None)  # Se non c'è percorso valido, non ci sono ostacoli da rilevare
+
+        for obstacle in static_obstacle_list:            
+            # Ottieni la bounding box dell'attore statico
+            bb = obstacle.bounding_box
+            vertices = bb.get_world_vertices(obstacle.get_transform())
+            poly = Polygon([[v.x, v.y, v.z] for v in vertices])  # Crea un poligono dalla bounding box
+
+            # Verifica se il poligono del percorso interseca il poligono dell'ostacolo
+            if route_polygon.intersects(poly):
+                return (True, obstacle)  # Se c'è un'intersezione, l'ostacolo è rilevato
+
+        return (False, None)  # Nessun ostacolo trovato
+

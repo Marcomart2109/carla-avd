@@ -1,1 +1,8 @@
 .DS_Store
+**/__pycache__/
+**/*.py[cod]
+# Ignoring results directory
+results/
+# Ignoring run_test.sh
+**/run_test.sh
+**/speed.txt
