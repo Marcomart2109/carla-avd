@@ -3,13 +3,13 @@
         "global_record": {
             "index": -1,
             "route_id": -1,
-            "status": "Failed",
+            "status": "Completed",
             "infractions": {
                 "collisions_layout": 0.0,
                 "collisions_pedestrian": 0.0,
                 "collisions_vehicle": 0.0,
                 "red_light": 0.0,
-                "stop_infraction": 0.0,
+                "stop_infraction": 5.01,
                 "outside_route_lanes": 0,
                 "min_speed_infractions": 0.0,
                 "yield_emergency_vehicles_infractions": 0.0,
@@ -19,9 +19,9 @@
                 "route_timeout": 0.0
             },
             "scores_mean": {
-                "score_composed": 0.0,
-                "score_route": 0.0,
-                "score_penalty": 1.0
+                "score_composed": 80.0,
+                "score_route": 100.0,
+                "score_penalty": 0.8
             },
             "scores_std_dev": {
                 "score_composed": "NaN",
@@ -29,13 +29,7 @@
                 "score_penalty": "NaN"
             },
             "meta": {
-                "exceptions": [
-                    [
-                        "RouteScenario_0_rep0",
-                        0,
-                        "Failed - Agent crashed"
-                    ]
-                ]
+                "exceptions": []
             }
         },
         "progress": [
@@ -46,14 +40,16 @@
             {
                 "index": 0,
                 "route_id": "RouteScenario_0_rep0",
-                "status": "Failed - Agent crashed",
-                "num_infractions": 0,
+                "status": "Completed",
+                "num_infractions": 1,
                 "infractions": {
                     "collisions_layout": [],
                     "collisions_pedestrian": [],
                     "collisions_vehicle": [],
                     "red_light": [],
-                    "stop_infraction": [],
+                    "stop_infraction": [
+                        "Agent ran a stop with id=12032 at (x=283.839, y=6107.562, z=358.048)"
+                    ],
                     "outside_route_lanes": [],
                     "min_speed_infractions": [],
                     "yield_emergency_vehicles_infractions": [],
@@ -63,14 +59,14 @@
                     "route_timeout": []
                 },
                 "scores": {
-                    "score_route": 0.0,
-                    "score_penalty": 1.0,
-                    "score_composed": 0.0
+                    "score_route": 100,
+                    "score_penalty": 0.8,
+                    "score_composed": 80.0
                 },
                 "meta": {
                     "route_length": 199.607,
-                    "duration_game": 0.1,
-                    "duration_system": 2.448
+                    "duration_game": 25.95,
+                    "duration_system": 40.611
                 }
             }
         ]
@@ -86,14 +82,14 @@
         "carla_speedometer"
     ],
     "values": [
+        "80.0",
+        "100.0",
+        "0.8",
         "0.0",
         "0.0",
-        "1.0",
         "0.0",
         "0.0",
-        "0.0",
-        "0.0",
-        "0.0",
+        "5.01",
         "0",
         "0.0",
         "0.0",
