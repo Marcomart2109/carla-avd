@@ -9,6 +9,7 @@ waypoints and avoiding other vehicles. The agent also responds to traffic lights
 traffic signs, and has different possible configurations. """
 
 import random
+import math
 import numpy as np
 import carla
 from basic_agent import BasicAgent
@@ -325,27 +326,42 @@ class BehaviorAgent(BasicAgent):
         """
         Handles avoidance behavior for static obstacles such as signs,
         barriers, or construction props. Attempts lane changes if possible;
-        otherwise, performs an emergency stop.
+        otherwise, performs an emergency stop only if the obstacle is blocking the lane.
         """
+        # Parameters
+        early_detection_distance = 20.0  # meters
+        lateral_clearance_threshold = 1.5  # meters: how far laterally an object can be to be ignored
+
+        # Filter relevant static props
         props = [actor for actor in self._world.get_actors()
                 if "prop" in actor.type_id or "construction" in actor.type_id or "barrier" in actor.type_id]
 
-        def dist(p): return p.get_location().distance(waypoint.transform.location)
-        props = [p for p in props if dist(p) < 15]
+        ego_transform = self._vehicle.get_transform()
+        ego_loc = ego_transform.location
+        ego_forward = ego_transform.get_forward_vector()
+
+        def is_in_path(prop):
+            """
+            Checks if the prop is in the vehicle's path based on forward vector projection and lateral offset.
+            """
+            prop_loc = prop.get_location()
+            vector_to_prop = prop_loc - ego_loc
+
+            # Project vector_to_prop on the vehicle's forward vector to get longitudinal distance
+            longitudinal = ego_forward.x * vector_to_prop.x + ego_forward.y * vector_to_prop.y
+            lateral_vector = vector_to_prop - longitudinal * ego_forward
+            lateral_distance = math.sqrt(lateral_vector.x ** 2 + lateral_vector.y ** 2)
+
+            return longitudinal > 0 and lateral_distance < lateral_clearance_threshold, longitudinal, lateral_distance
 
         for prop in props:
-            loc = prop.get_location()
-            ego_loc = self._vehicle.get_location()
-            distance = loc.distance(ego_loc)
+            in_path, longitudinal_distance, lateral_distance = is_in_path(prop)
 
-            # Adjust distance by accounting for bounding boxes
-            distance -= max(
-                prop.bounding_box.extent.x, prop.bounding_box.extent.y) + max(
-                self._vehicle.bounding_box.extent.x, self._vehicle.bounding_box.extent.y)
+            if in_path and longitudinal_distance < early_detection_distance:
+                print(f"[StaticAvoid] Detected static prop in path: '{prop.type_id}' (ID: {prop.id}) "
+                    f"→ longitudinal={longitudinal_distance:.2f} m, lateral={lateral_distance:.2f} m")
 
-            if distance < self._behavior.braking_distance:
-
-                # Try changing lane to the right
+                # Attempt lane change to right
                 right_wpt = waypoint.get_right_lane()
                 if right_wpt and right_wpt.lane_type == carla.LaneType.Driving \
                         and waypoint.lane_id * right_wpt.lane_id > 0:
@@ -358,13 +374,13 @@ class BehaviorAgent(BasicAgent):
                     )[0]
 
                     if not obstacle_right:
-                        print("[StaticAvoid] Static obstacle detected: switching to right lane")
+                        print("[StaticAvoid] Switching to right lane to avoid static obstacle.")
                         end_waypoint = self._local_planner.target_waypoint
                         self.set_destination(end_waypoint.transform.location,
                                             right_wpt.transform.location)
                         return False  # Avoid stop
 
-                # Try changing lane to the left
+                # Attempt lane change to left
                 left_wpt = waypoint.get_left_lane()
                 if left_wpt and left_wpt.lane_type == carla.LaneType.Driving \
                         and waypoint.lane_id * left_wpt.lane_id > 0:
@@ -377,15 +393,18 @@ class BehaviorAgent(BasicAgent):
                     )[0]
 
                     if not obstacle_left:
-                        print("[StaticAvoid] Static obstacle detected: switching to left lane")
+                        print("[StaticAvoid] Switching to left lane to avoid static obstacle.")
                         end_waypoint = self._local_planner.target_waypoint
                         self.set_destination(end_waypoint.transform.location,
                                             left_wpt.transform.location)
                         return False  # Avoid stop
 
-                # No lane change possible → emergency stop
-                print("[StaticAvoid] No free lane → performing emergency stop")
+                # No safe lane change possible → emergency stop
+                print("[StaticAvoid] No free lane → performing emergency stop.")
                 return True
 
         return False
+
+
+
 
