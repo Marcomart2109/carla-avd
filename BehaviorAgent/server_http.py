@@ -264,6 +264,7 @@ def index():
                 <img src="/rgbimage" />
             </div>
             <div id="controls">Loading...</div>
+            <div id="speedometer" style="font-size: 48px; font-weight: bold; color: #007BFF; text-align: center;">0 km/h</div>
         </div>
         <div id="right-panel">
             <h2>Speed Chart</h2>
@@ -298,6 +299,9 @@ def index():
                     success: function(result) {
                         document.getElementById('controls').innerHTML =
                             `Throttle: ${result.throttle.toFixed(2)} | Steer: ${result.steer.toFixed(2)} | Brake: ${result.brake.toFixed(2)}`;
+                            
+                        document.getElementById('speedometer').innerHTML = Math.round(result.current_speed) + " km/h";
+
                         const ts = new Date().toLocaleTimeString();
                         labels.push(ts); targetData.push(result.target_speed); currentData.push(result.current_speed);
                         if (labels.length > 30) { labels.shift(); targetData.shift(); currentData.shift(); }
