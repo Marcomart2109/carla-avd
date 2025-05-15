@@ -259,7 +259,7 @@ class BehaviorAgent(BasicAgent):
         # 2.1: Pedestrian avoidance behaviors
         walker_state, walker, w_distance = self.pedestrian_avoid_manager(ego_vehicle_wp)
 
-        # 2.1.1: Static obstacle avoidance
+        # 2.2: Static obstacle avoidance behavior
         if self.static_obstacle_avoid_manager(ego_vehicle_wp):
             return self.emergency_stop()
 
@@ -323,12 +323,13 @@ class BehaviorAgent(BasicAgent):
 
     def static_obstacle_avoid_manager(self, waypoint):
         """
-        Gestisce ostacoli statici come segnali luminosi per lavori in corso.
-        
-        :param waypoint: waypoint corrente del veicolo
-        :return: True se c'è un ostacolo statico da evitare, altrimenti False
+        Handles avoidance behavior for static obstacles such as signs,
+        barriers, or construction props. Attempts lane changes if possible;
+        otherwise, performs an emergency stop.
         """
-        props = self._world.get_actors().filter("*static.prop*")
+        props = [actor for actor in self._world.get_actors()
+                if "prop" in actor.type_id or "construction" in actor.type_id or "barrier" in actor.type_id]
+
         def dist(p): return p.get_location().distance(waypoint.transform.location)
         props = [p for p in props if dist(p) < 15]
 
@@ -337,7 +338,54 @@ class BehaviorAgent(BasicAgent):
             ego_loc = self._vehicle.get_location()
             distance = loc.distance(ego_loc)
 
+            # Adjust distance by accounting for bounding boxes
+            distance -= max(
+                prop.bounding_box.extent.x, prop.bounding_box.extent.y) + max(
+                self._vehicle.bounding_box.extent.x, self._vehicle.bounding_box.extent.y)
+
             if distance < self._behavior.braking_distance:
+
+                # Try changing lane to the right
+                right_wpt = waypoint.get_right_lane()
+                if right_wpt and right_wpt.lane_type == carla.LaneType.Driving \
+                        and waypoint.lane_id * right_wpt.lane_id > 0:
+
+                    obstacle_right = self._vehicle_obstacle_detected(
+                        self._world.get_actors().filter("*vehicle*"),
+                        max(self._behavior.min_proximity_threshold, self._speed_limit / 2),
+                        up_angle_th=180,
+                        lane_offset=1
+                    )[0]
+
+                    if not obstacle_right:
+                        print("[StaticAvoid] Static obstacle detected: switching to right lane")
+                        end_waypoint = self._local_planner.target_waypoint
+                        self.set_destination(end_waypoint.transform.location,
+                                            right_wpt.transform.location)
+                        return False  # Avoid stop
+
+                # Try changing lane to the left
+                left_wpt = waypoint.get_left_lane()
+                if left_wpt and left_wpt.lane_type == carla.LaneType.Driving \
+                        and waypoint.lane_id * left_wpt.lane_id > 0:
+
+                    obstacle_left = self._vehicle_obstacle_detected(
+                        self._world.get_actors().filter("*vehicle*"),
+                        max(self._behavior.min_proximity_threshold, self._speed_limit / 2),
+                        up_angle_th=180,
+                        lane_offset=-1
+                    )[0]
+
+                    if not obstacle_left:
+                        print("[StaticAvoid] Static obstacle detected: switching to left lane")
+                        end_waypoint = self._local_planner.target_waypoint
+                        self.set_destination(end_waypoint.transform.location,
+                                            left_wpt.transform.location)
+                        return False  # Avoid stop
+
+                # No lane change possible → emergency stop
+                print("[StaticAvoid] No free lane → performing emergency stop")
                 return True
 
         return False
+
