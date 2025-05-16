@@ -15,6 +15,6 @@
     "longitudinal_control_dict" :{"K_P": 0.888, "K_I": 0.0768, "K_D": 0.5, "dt": 0.05},
     "lateral_control_dict" : {"K_V": 4, "K_S": 1, "dt": 0.05},
     "target_speed": 30.0,
-    "Visualizer_IP" : "172.16.174.233",
+    "Visualizer_IP" : "127.0.0.1",
     "SaveSpeedData" : "speed.txt"
 }

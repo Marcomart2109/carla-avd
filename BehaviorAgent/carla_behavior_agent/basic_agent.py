@@ -16,7 +16,7 @@ from local_planner import LocalPlanner, RoadOption
 from global_route_planner import GlobalRoutePlanner
 from misc import (get_speed, is_within_distance,
                                get_trafficlight_trigger_location,
-                               compute_distance)
+                               compute_distance,dist)
 # from perception.perfectTracker.gt_tracker import PerfectTracker
 
 class BasicAgent(object):
@@ -459,92 +459,80 @@ class BasicAgent(object):
         for target_vehicle in vehicle_list:
             target_transform = target_vehicle.get_transform()
             target_wpt = self._map.get_waypoint(target_transform.location, lane_type=carla.LaneType.Any)
-
-            # Simplified version for outside junctions
-            if not ego_wpt.is_junction or not target_wpt.is_junction:
-
-                if target_wpt.road_id != ego_wpt.road_id or target_wpt.lane_id != ego_wpt.lane_id  + lane_offset:
-                    next_wpt = self._local_planner.get_incoming_waypoint_and_direction(steps=3)[0]
-                    if not next_wpt:
-                        continue
-                    if target_wpt.road_id != next_wpt.road_id or target_wpt.lane_id != next_wpt.lane_id  + lane_offset:
-                        continue
-
-                target_forward_vector = target_transform.get_forward_vector()
-                target_extent = target_vehicle.bounding_box.extent.x
-                target_rear_transform = target_transform
-                target_rear_transform.location -= carla.Location(
-                    x=target_extent * target_forward_vector.x,
-                    y=target_extent * target_forward_vector.y,
-                )
-
-                if is_within_distance(target_rear_transform, ego_front_transform, max_distance, [low_angle_th, up_angle_th]):
-                    return (True, target_vehicle, compute_distance(target_transform.location, ego_transform.location))
-
             # Waypoints aren't reliable, check the proximity of the vehicle to the route
-            else:
-                route_bb = []
-                ego_location = ego_transform.location
-                extent_y = self._vehicle.bounding_box.extent.y
-                r_vec = ego_transform.get_right_vector()
-                p1 = ego_location + carla.Location(extent_y * r_vec.x, extent_y * r_vec.y)
-                p2 = ego_location + carla.Location(-extent_y * r_vec.x, -extent_y * r_vec.y)
+            route_bb = []
+            ego_location = ego_transform.location
+            extent_y = self._vehicle.bounding_box.extent.y
+            r_vec = ego_transform.get_right_vector()
+            p1 = ego_location + carla.Location(extent_y * r_vec.x, extent_y * r_vec.y)
+            p2 = ego_location + carla.Location(-extent_y * r_vec.x, -extent_y * r_vec.y)
+            route_bb.append([p1.x, p1.y, p1.z])
+            route_bb.append([p2.x, p2.y, p2.z])
+
+            for wp, _ in self._local_planner.get_plan():
+                if ego_location.distance(wp.transform.location) > max_distance:
+                    break
+
+                r_vec = wp.transform.get_right_vector()
+                p1 = wp.transform.location + carla.Location(extent_y * r_vec.x, extent_y * r_vec.y)
+                p2 = wp.transform.location + carla.Location(-extent_y * r_vec.x, -extent_y * r_vec.y)
                 route_bb.append([p1.x, p1.y, p1.z])
                 route_bb.append([p2.x, p2.y, p2.z])
 
-                for wp, _ in self._local_planner.get_plan():
-                    if ego_location.distance(wp.transform.location) > max_distance:
-                        break
-
-                    r_vec = wp.transform.get_right_vector()
-                    p1 = wp.transform.location + carla.Location(extent_y * r_vec.x, extent_y * r_vec.y)
-                    p2 = wp.transform.location + carla.Location(-extent_y * r_vec.x, -extent_y * r_vec.y)
-                    route_bb.append([p1.x, p1.y, p1.z])
-                    route_bb.append([p2.x, p2.y, p2.z])
-
-                if len(route_bb) < 3:
-                    # 2 points don't create a polygon, nothing to check
-                    return (False, None, -1)
-                ego_polygon = Polygon(route_bb)
-
-                # Compare the two polygons
-                for target_vehicle in vehicle_list:
-                    target_extent = target_vehicle.bounding_box.extent.x
-                    if target_vehicle.id == self._vehicle.id:
-                        continue
-                    if ego_location.distance(target_vehicle.get_location()) > max_distance:
-                        continue
-
-                    target_bb = target_vehicle.bounding_box
-                    target_vertices = target_bb.get_world_vertices(target_vehicle.get_transform())
-                    target_list = [[v.x, v.y, v.z] for v in target_vertices]
-                    target_polygon = Polygon(target_list)
-
-                    if ego_polygon.intersects(target_polygon):
-                        return (True, target_vehicle, compute_distance(target_vehicle.get_location(), ego_location))
-
+            if len(route_bb) < 3:
+                # 2 points don't create a polygon, nothing to check
                 return (False, None, -1)
+            ego_polygon = Polygon(route_bb)
+
+            # Compare the two polygons
+            for target_vehicle in vehicle_list:
+                target_extent = target_vehicle.bounding_box.extent.x
+                if target_vehicle.id == self._vehicle.id:
+                    continue
+                if ego_location.distance(target_vehicle.get_location()) > max_distance:
+                    continue
+
+                target_bb = target_vehicle.bounding_box
+                target_vertices = target_bb.get_world_vertices(target_vehicle.get_transform())
+                target_list = [[v.x, v.y, v.z] for v in target_vertices]
+                target_polygon = Polygon(target_list)
+
+                if ego_polygon.intersects(target_polygon):
+                    return (True, target_vehicle, compute_distance(target_vehicle.get_location(), ego_location))
+
+            return (False, None, -1)
 
         return (False, None, -1)
 
-    def _generate_lane_change_path(self, waypoint, direction='left', distance_same_lane=10,
-                                distance_other_lane=25, lane_change_distance=25,
-                                check=True, lane_changes=1, step_distance=2):
+    def _generate_lane_change_path(self, 
+                                   waypoint: carla.Waypoint, 
+                                   direction: str = 'left',
+                                   distance_same_lane: str = 10,
+                                   distance_other_lane: int = 25, 
+                                   lane_change_distance: int = 25,
+                                   check: bool = True, 
+                                   lane_changes: int = 1, 
+                                   step_distance: float = 4.5,
+                                   concorde: bool = False):  
         """
-        This methods generates a path that results in a lane change.
-        Use the different distances to fine-tune the maneuver.
+        This methods generates a path that results in a lane change. Use the different distances to fine-tune the maneuver.
         If the lane change is impossible, the returned path will be empty.
+
+        params:
+        - waypoint: starting waypoint of lane change
+        - direction: overtake direction,'left' if overtake should be executed going left wrt waypoint, 'right' if going right
+        - distance_same_lane: travelled distance in the same lane of 'waypoint'
+        - distance_other_lane: travelled distance in the lane after the lane change
+        - lane_change_distance: distance to move from 'waypoint' lane to the other', as horizontal component
+        - check: flag to verify if the lane change is permitted on the current road
+        - lane_changes: specifies how many lanes to move from 'waypoint' lane
         """
-        distance_same_lane = max(distance_same_lane, 0.1)
-        distance_other_lane = max(distance_other_lane, 0.1)
-        lane_change_distance = max(lane_change_distance, 0.1)
-
-        plan = []
-        plan.append((waypoint, RoadOption.LANEFOLLOW))  # start position
-
+        # Initialize the plan with the current waypoint
+        plan = [(waypoint, RoadOption.LANEFOLLOW)]
+        # Initialize the option with the default value (LANEFOLLOW)
         option = RoadOption.LANEFOLLOW
 
-        # Same lane
+        # 1. MOVE FORWARD IN THE CURRENT LANE
         distance = 0
         while distance < distance_same_lane:
             next_wps = plan[-1][0].next(step_distance)
@@ -565,7 +553,7 @@ class BasicAgent(object):
         lane_changes_done = 0
         lane_change_distance = lane_change_distance / lane_changes
 
-        # Lane change
+        # 2. CHANGE LANES
         while lane_changes_done < lane_changes:
 
             # Move forward
@@ -574,16 +562,18 @@ class BasicAgent(object):
                 return []
             next_wp = next_wps[0]
 
-            # Get the side lane
+            # Check if the lane change is permitted (if the road has a left lane)
             if direction == 'left':
                 if check and str(next_wp.lane_change) not in ['Left', 'Both']:
                     return []
                 side_wp = next_wp.get_left_lane()
+            # Check if the lane change is permitted (if the road has a right lane)
             else:
                 if check and str(next_wp.lane_change) not in ['Right', 'Both']:
                     return []
                 side_wp = next_wp.get_right_lane()
 
+            # Check if the lane change is permitted (if the road has a left or right lane)
             if not side_wp or side_wp.lane_type != carla.LaneType.Driving:
                 return []
 
@@ -591,10 +581,14 @@ class BasicAgent(object):
             plan.append((side_wp, option))
             lane_changes_done += 1
 
-        # Other lane
+        # 3. MOVE FORWARD IN THE NEW LANE
         distance = 0
+        pivot = plan[-1][0].lane_id
         while distance < distance_other_lane:
-            next_wps = plan[-1][0].next(step_distance)
+            if waypoint.lane_id * pivot > 0 and concorde:
+                next_wps = plan[-1][0].next(step_distance)
+            else:
+                next_wps = plan[-1][0].previous(step_distance)
             if not next_wps:
                 return []
             next_wp = next_wps[0]
@@ -642,5 +636,26 @@ class BasicAgent(object):
             return None
 
         return Polygon(route_bb)  # Crea un poligono usando i punti raccolti
+
+    
+    def _get_ordered_vehicles(self, reference : carla.Actor, max_distance: float) -> list:
+        # Get all vehicles in the scene
+        vehicle_list = self._world.get_actors().filter("*vehicle*")
+        # Sort the vehicles by distance to the vehicle in question
+        # Remove the reference vehicle from the list
+        if isinstance(reference, carla.Actor):
+            vehicle_list = [
+                v for v in vehicle_list
+                if v.id != reference.id and 0.1 < dist(v, reference) < max_distance
+            ]
+        else:
+            vehicle_list = [
+                v for v in vehicle_list
+                if 0.1 < dist(v, reference) < max_distance
+            ]
+        
+        # Sort the vehicles by distance to the ego vehicle
+        vehicle_list.sort(key=lambda v: dist(v, reference))
+        return vehicle_list
 
     

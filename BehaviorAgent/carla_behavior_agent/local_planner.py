@@ -8,6 +8,7 @@
 from enum import IntEnum
 from collections import deque
 import random
+import math
 
 import carla
 from controller import VehicleController
@@ -299,6 +300,93 @@ class LocalPlanner(object):
         :return: boolean
         """
         return len(self._waypoints_queue) == 0
+
+
+    def set_overtake_plan(self, overtake_plan : list, overtake_distance : float) -> list:
+        """ 
+        Adds an overtake plan to the local planner. The overtake plan is a list of [carla.Waypoint, RoadOption] pairs.
+        The overtake distance is the distance to the end of the overtake plan at which the vehicle should return to the 
+        normal plan. So, the overtake plan is added to the local planner until this distance is reached.
+        
+        NOTE: The queue contains a list of [carla.Waypoint, RoadOption] pairs. The RoadOption is used to determine the
+        type of connection between the current waypoint and the next waypoint. So, we are interested only at the first 
+        element of the pair.
+        
+        :param overtake_plan: list of (carla.Waypoint, RoadOption)
+        :param overtake_distance: float
+        
+        :return: list of (carla.Waypoint, RoadOption)
+        """
+        def get_waypoint(distance: float) -> carla.Waypoint:
+            """
+            Get the waypoint at a distance ahead
+            """
+            try:
+                wpt = list(self._waypoints_queue[0][0].next(distance))[0]
+                return wpt
+            except IndexError as i:
+                return None        
+          
+        def get_waypoint_index(wp2: carla.Waypoint) -> int:
+            """
+            This function iterates through the waypoints in the plan and breaks the loop once a waypoint
+            outside the sampling radius is found after finding a waypoint within the radius. In other words, 
+            it returns the index of the next waypoint after the last waypoint within the sampling radius.
+            
+                :param wp2 (carla.Waypoint): waypoint to search in the plan
+                :return (int): index of the waypoint in the plan
+            """
+            # Get the length of the waypoints queue
+            waypoint_length = len(self._waypoints_queue)
+
+            idx = 0
+            # The first while loop iterates through the waypoints in the plan until it finds a waypoint whose distance from 
+            # the given waypoint is greater than the sampling radius.
+            while (idx < waypoint_length and self._waypoints_queue[idx][0].transform.location.distance(
+                    wp2.transform.location) > self._sampling_radius):
+                idx += 1
+            # The second while loop continues from the point where the first loop stopped and iterates through the waypoints until it finds
+            # a waypoint whose distance from the given waypoint is less than the sampling radius.
+            while (idx < waypoint_length and self._waypoints_queue[idx][0].transform.location.distance(
+                    wp2.transform.location) < self._sampling_radius):
+                idx += 1
+                
+            return idx
+
+        # Get the first waypoint at the overtake distance
+        end_overtake_wp = get_waypoint(overtake_distance)
+        # If the overtake plan is empty, return the current plan
+        if not end_overtake_wp:
+            return list(self._waypoints_queue)
+                
+        # Get the index of the end overtake waypoint in the plan
+        idx = get_waypoint_index(end_overtake_wp)
+         
+        # Return the overtake plan
+        overtake_plan.extend(list(self._waypoints_queue)[idx:])
+        return overtake_plan
+
+    def draw_waypoints(self, z = 0.2, size = 0.1, color = carla.Color(0, 255, 0)):
+        """
+        Draw a list of waypoints at a certain height given in z.
+
+            :param z: height in meters
+            :param size: size of the waypoint
+            :param color: color of the waypoint
+        """
+        waypoints = [self.target_waypoint]
+        for wpt in waypoints:
+            wpt_t = wpt.transform
+            begin = wpt_t.location + carla.Location(z=z)
+            angle = math.radians(wpt_t.rotation.yaw)
+            end = begin + carla.Location(x = math.cos(angle), y = math.sin(angle))
+            self._vehicle.get_world().debug.draw_point(end, size = size, life_time = 3.0, color = color)
+
+    def set_lateral_offset(self, offset : float) -> None:
+        '''
+        Set the lateral offset of the controller.
+        '''
+        self._vehicle_controller._lat_controller.offset = offset
 
 
 def _retrieve_options(list_waypoints, current_waypoint):

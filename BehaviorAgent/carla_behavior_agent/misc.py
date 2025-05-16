@@ -1,11 +1,3 @@
-#!/usr/bin/env python
-
-# Copyright (c) 2018 Intel Labs.
-# authors: German Ros (german.ros@intel.com)
-#
-# This work is licensed under the terms of the MIT license.
-# For a copy, see <https://opensource.org/licenses/MIT>.
-
 """ Module with auxiliary functions. """
 
 import math
@@ -169,3 +161,84 @@ def positive(num):
         :param num: value to check
     """
     return num if num > 0.0 else 0.0
+
+def dist(a: any, b: any) -> float:
+        """
+        Calculate the distance between two objects: a and b. These two objects can be of type carla.Vehicle, carla.Waypoint, or carla.Location.
+
+        :param a: first object (carla.Actor, carla.Landmark, carla.Waypoint, or carla.Location)
+        :param b: second object (carla.Actor, carla.Landmark, carla.Waypoint, or carla.Location)
+
+        :return: distance between the two objects (float)
+        """
+        # Check if input 'a' is of type carla.Landmark and convert it to a carla.Waypoint object.
+        if isinstance(a, carla.Landmark):
+            a = a.waypoint
+        # Check if input 'b' is of type carla.Landmark and convert it to a carla.Waypoint object.
+        if isinstance(b, carla.Landmark):
+            b = b.waypoint
+            
+        # Check if input 'a' is of type carla.Transform and convert it to a carla.Location object.
+        if isinstance(a, carla.Transform):
+            a = a.location
+        # Check if input 'b' is of type carla.Transform and convert it to a carla.Location object.
+        if isinstance(b, carla.Transform):
+            b = b.location
+
+        # Check if both input objects are of type carla.Actor.
+        if isinstance(a, carla.Actor) and isinstance(b, carla.Actor):
+            return a.get_location().distance(b.get_location())
+        # Check if input 'a' is of type carla.Actor and input 'b' is of type carla.Waypoint.
+        elif isinstance(a, carla.Actor) and isinstance(b, carla.Waypoint):
+            return a.get_location().distance(b.transform.location)
+        # Check if input 'a' is of type carla.Waypoint and input 'b' is of type carla.Actor.
+        elif isinstance(a, carla.Waypoint) and isinstance(b, carla.Actor):
+            return a.transform.location.distance(b.get_location())
+        # Check if both input objects are of type carla.Waypoint.
+        elif isinstance(a, carla.Waypoint) and isinstance(b, carla.Waypoint):
+            return a.transform.location.distance(b.transform.location)
+        # Check if input 'a' is of type carla.Location and input 'b' is of type carla.Location.
+        elif isinstance(a, carla.Actor) and isinstance(b, carla.Location):
+            return a.get_location().distance(b)
+        elif isinstance(a, carla.Location) and isinstance(b, carla.Actor):
+            return a.distance(b.get_location())
+        elif isinstance(a, carla.Location) and isinstance(b, carla.Waypoint):
+            return a.distance(b.transform.location)
+        elif isinstance(a, carla.Waypoint) and isinstance(b, carla.Location):
+            return a.transform.location.distance(b)
+        elif isinstance(a, carla.Location) and isinstance(b, carla.Location):
+            return a.distance(b)
+        # If none of the above conditions are met, raise a ValueError.
+        else:
+            raise ValueError("Invalid input types. Please provide either carla.Actor, carla.Landmark, carla.Waypoint, or carla.Location objects.")
+
+        
+def compute_distance_from_center(actor1 : carla.Actor, actor2 : carla.Actor = None, distance : float = 5) -> float:
+    """
+    Compute the distance between the center of two actors. 
+    NOTE: We use the bounding boxes to calculate the actual distance.
+    
+        :param actor1: first actor (carla.Actor)
+        :param actor2: second actor (carla.Actor)
+        :param distance: distance between the two actors (float)
+        
+        :return: distance between the center of the two actors (float)
+    """
+    actor1_extent = max(actor1.bounding_box.extent.x, actor1.bounding_box.extent.y)
+    actor2_extent = max(actor2.bounding_box.extent.x, actor2.bounding_box.extent.y) if actor2 else 0
+    return distance - actor1_extent - actor2_extent
+
+
+def is_bicycle_near_center(vehicle_location : carla.Location, ego_vehicle_wp : carla.Waypoint) -> bool:
+    """
+    This function checks if the bicycle is near the center of the lane.
+    
+        :param vehicle_location (carla.Location): location of the vehicle.
+        :param ego_vehicle_wp (carla.Waypoint): waypoint of the ego vehicle.
+        
+        :return (bool): True if the bicycle is near the center of the lane, False otherwise.
+    """
+    lane_center_offset = 0.3                   # How close to the center the bicycle needs to be considered in the center
+    vehicle_y = vehicle_location.y
+    lane_center_y = ego_vehicle_wp.transform.location.y
+    return abs(vehicle_y - lane_center_y) < lane_center_offset

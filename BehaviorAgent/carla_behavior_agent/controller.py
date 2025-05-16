@@ -264,7 +264,7 @@ class StanleyLateralController():
         # Crosstrack error
         lateral_error = \
               ((observed_x-desired_x)*desired_heading_y -
-              (observed_y-desired_y)*desired_heading_x) / (dd + sys.float_info.epsilon)
+              (observed_y-desired_y)*desired_heading_x) / (dd + sys.float_info.epsilon) + self._offset
         
         # Heading error
         steering = (desired_heading-observed_heading)
@@ -303,6 +303,20 @@ class StanleyLateralController():
             dd = hypot(trj_heading_x, trj_heading_y)
             if dd > 0:
                 self._wps.append(wps[i])
+    
+    @property
+    def offset(self):
+        '''
+        Get the offset of the vehicle from the center of the lane.
+        '''
+        return self._offset
+    
+    @offset.setter
+    def offset(self, offset : int):
+        '''
+        Set the offset of the vehicle from the center of the lane.
+        '''
+        self._offset = offset
         
 class PIDLateralController():
     """

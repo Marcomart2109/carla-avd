@@ -6,3 +6,8 @@ results/
 # Ignoring run_test.sh
 **/run_test.sh
 **/speed.txt
+
+# Ignoring the folder group
+gruppo/
+
+**/carla_behavior_agent/logs/**  
