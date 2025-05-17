@@ -32,7 +32,7 @@ class BehaviorAgent(BasicAgent):
     are encoded in the agent, from cautious to a more aggressive ones.
     """
 
-    def __init__(self, vehicle, behavior='normal', opt_dict={}, map_inst=None, grp_inst=None):
+    def __init__(self, vehicle, behavior='cautious', opt_dict={}, map_inst=None, grp_inst=None):
         """
         Constructor method.
 
@@ -65,6 +65,9 @@ class BehaviorAgent(BasicAgent):
             self._behavior = Aggressive()
 
         self._overtake = Overtake(self._vehicle, opt_dict)
+        
+        # Aggiungi una variabile per tenere traccia dello stato dell'offset laterale
+        self._lateral_offset_active = False
 
         self.logger = logging.getLogger('behavior_agent')
         self.logger.setLevel(logging.DEBUG)
@@ -184,7 +187,7 @@ class BehaviorAgent(BasicAgent):
             print(msg)
             self.logger.debug(msg)
 
-            if not self._overtake.in_overtake and distance < 6 * self._behavior.braking_distance:
+            if not self._overtake.in_overtake and distance < 2 * self._behavior.braking_distance:
                 self.set_target_speed(self._approach_speed)
                 msg = f"[INFO - Static Obstacle Avoidance] Target speed set to:{self._approach_speed}\n[INFO] Distance to static obstacle: {distance}"
                 print(msg)
@@ -208,14 +211,15 @@ class BehaviorAgent(BasicAgent):
             # Get the yaw of the ego vehicle and the vehicle in front.
             ego_yaw = abs(self._vehicle.get_transform().rotation.yaw)
             vehicle_yaw = abs(bicycle.get_transform().rotation.yaw)
-
+            
+            # Check if the vehicles are approximately aligned
             if abs(ego_yaw - vehicle_yaw) < 10:                   
                 # Check if the bicycle is near the center of the lane. In this case, the agent will overtake the bicycle.
                 if is_bicycle_near_center(vehicle_location=bicycle.get_location(), ego_vehicle_wp=ego_vehicle_wp) and get_speed(self._vehicle) < 0.1:
                     print("--- Bicycle is near the center of the lane! We can try to overtake it.")
 
                     overtake_path = self._overtake.run_step(
-                        object_to_overtake=vehicle, ego_vehicle_wp=ego_vehicle_wp, distance_same_lane=1, distance_from_object=vehicle_distance, speed_limit = self._speed_limit
+                        object_to_overtake=bicycle, ego_vehicle_wp=ego_vehicle_wp, distance_same_lane=1, distance_from_object=b_distance, speed_limit = self._speed_limit
                     )                                               
                     if overtake_path:
                         self.__update_global_plan(overtake_path=overtake_path)
@@ -225,7 +229,9 @@ class BehaviorAgent(BasicAgent):
                 # the vehicle if the road is straight.
                 else:
                     print("--- Bicycle is not near the center of the lane! We can move of an offset to avoid it.")
-                    self._local_planner.set_lateral_offset(-(2.5 * bicycle.bounding_box.extent.y + self._vehicle.bounding_box.extent.y))
+                    new_offset = -(2.5 * bicycle.bounding_box.extent.y + self._vehicle.bounding_box.extent.y)
+                    self._local_planner.set_lateral_offset(new_offset)
+                    self._lateral_offset_active = True
                     target_speed = min([
                         self._behavior.max_speed,
                         self._speed_limit - self._behavior.speed_lim_dist])
@@ -238,10 +244,13 @@ class BehaviorAgent(BasicAgent):
                 return self._local_planner.run_step()
             else:
                 print("--- Road is not straight! We follow it until the road is straight.")
-                control =  self.car_following_manager(bicycle, b_distance, debug=debug)
-        
+                control = self.car_following_manager(bicycle, b_distance, debug=debug)
+        elif self._lateral_offset_active:
+            # Resetta l'offset solo se era attivo e non ci sono più biciclette
+            print("--- No bicycle detected, resetting lateral offset to 0")
+            self._local_planner.set_lateral_offset(0.0)
+            self._lateral_offset_active = False
                 
-            
 
         # 2.2: Car following behaviors
         vehicle_state, vehicle, distance = self.collision_and_car_avoid_manager(ego_vehicle_wp)
