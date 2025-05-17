@@ -259,14 +259,17 @@ class BasicAgent(object):
 
         self.set_global_plan(path)
 
-    def _affected_by_traffic_light(self, lights_list=None, max_distance=None):
+    def _affected_by_traffic_light(self, vehicle, lights_list=None, max_distance=None):
         """
-        Method to check if there is a red light affecting the vehicle.
+        Method to check if a specific vehicle is affected by a red traffic light.
 
-            :param lights_list (list of carla.TrafficLight): list containing TrafficLight objects.
-                If None, all traffic lights in the scene are used
-            :param max_distance (float): max distance for traffic lights to be considered relevant.
-                If None, the base threshold value is used
+        :param vehicle: The vehicle to check (carla.Vehicle)
+        :param lights_list: list containing TrafficLight objects.
+            If None, all traffic lights in the scene are used
+        :param max_distance: max distance for traffic lights to be considered relevant.
+            If None, the base threshold value is used
+        :return: Tuple of (bool, carla.TrafficLight) - If affected, returns (True, traffic_light),
+                 otherwise returns (False, None)
         """
         if self._ignore_traffic_lights:
             return (False, None)
@@ -277,14 +280,8 @@ class BasicAgent(object):
         if not max_distance:
             max_distance = self._base_tlight_threshold
 
-        if self._last_traffic_light:
-            if self._last_traffic_light.state != carla.TrafficLightState.Red:
-                self._last_traffic_light = None
-            else:
-                return (True, self._last_traffic_light)
-
-        ego_vehicle_location = self._vehicle.get_location()
-        ego_vehicle_waypoint = self._map.get_waypoint(ego_vehicle_location)
+        vehicle_location = vehicle.get_location()
+        vehicle_waypoint = self._map.get_waypoint(vehicle_location)
 
         for traffic_light in lights_list:
             if traffic_light.id in self._lights_map:
@@ -294,13 +291,13 @@ class BasicAgent(object):
                 trigger_wp = self._map.get_waypoint(trigger_location)
                 self._lights_map[traffic_light.id] = trigger_wp
 
-            if trigger_wp.transform.location.distance(ego_vehicle_location) > max_distance:
+            if trigger_wp.transform.location.distance(vehicle_location) > max_distance:
                 continue
 
-            if trigger_wp.road_id != ego_vehicle_waypoint.road_id:
+            if trigger_wp.road_id != vehicle_waypoint.road_id:
                 continue
 
-            ve_dir = ego_vehicle_waypoint.transform.get_forward_vector()
+            ve_dir = vehicle_waypoint.transform.get_forward_vector()
             wp_dir = trigger_wp.transform.get_forward_vector()
             dot_ve_wp = ve_dir.x * wp_dir.x + ve_dir.y * wp_dir.y + ve_dir.z * wp_dir.z
 
@@ -310,8 +307,7 @@ class BasicAgent(object):
             if traffic_light.state != carla.TrafficLightState.Red:
                 continue
 
-            if is_within_distance(trigger_wp.transform, self._vehicle.get_transform(), max_distance, [0, 90]):
-                self._last_traffic_light = traffic_light
+            if is_within_distance(trigger_wp.transform, vehicle.get_transform(), max_distance, [0, 90]):
                 return (True, traffic_light)
 
         return (False, None)
@@ -657,5 +653,88 @@ class BasicAgent(object):
         # Sort the vehicles by distance to the ego vehicle
         vehicle_list.sort(key=lambda v: dist(v, reference))
         return vehicle_list
+    
+    def is_vehicle_legitimately_stopped(self, vehicle: carla.Vehicle) -> tuple:
+        '''
+        This method determines if a vehicle is stopped for a legitimate traffic reason or if it's
+        parked/abandoned and therefore can be overtaken.
+        
+        The method checks various conditions to determine if a vehicle is stopped due to
+        traffic conditions (such as a red light, stop sign, or junction) or if it's simply
+        parked or abandoned on the road.
+        
+        :param vehicle: The vehicle to evaluate
+        
+        :return: A tuple containing:
+            - vehicle_wp (carla.Waypoint): waypoint of the evaluated vehicle
+            - is_abandoned (bool): True if the vehicle is considered parked/abandoned (and therefore overtakable),
+              False if the vehicle is stopped for a legitimate traffic reason
+        '''
+        # Get vehicle location and waypoint
+        vehicle_loc = vehicle.get_location()
+        vehicle_wp = self._map.get_waypoint(vehicle_loc)
+
+        # Get nearby traffic lights
+        lights_list = self._world.get_actors().filter("*traffic_light*")
+        lights_list = [l for l in lights_list if is_within_distance(l.get_transform(), vehicle.get_transform(), 50, angle_interval=[0, 90])]
+
+        # Check if the vehicle is affected by a stop sign or by a traffic light
+        affected_by_traffic_light, _ = self._affected_by_traffic_light(self._vehicle)
+        affected_by_stop_sign, _ = self._affected_by_sign(self._vehicle)
+
+        # If the ego vehicle is not affected by signage, check surrounding vehicles
+        if not affected_by_stop_sign or not affected_by_traffic_light:
+            vehicle_list = self._get_ordered_vehicles(vehicle, 30)
+            for v in vehicle_list:
+                if v.id == self._vehicle.id:
+                    continue
+                affected_by_traffic_light, _ = self._affected_by_traffic_light(v)
+                affected_by_stop_sign, _ = self._affected_by_sign(v)
+                if affected_by_stop_sign or affected_by_traffic_light:
+                    break
+
+        # A vehicle is considered parked/abandoned if:
+        # - It's practically stopped (speed < 0.1 km/h)
+        # - It's not affected by a stop sign
+        # - It's not affected by a traffic light
+        # - It's not in a junction
+        # - There are no traffic lights nearby
+        if get_speed(vehicle) < 0.1 and not affected_by_stop_sign and not affected_by_traffic_light and not vehicle_wp.is_junction and not lights_list:
+            return vehicle_wp, True  # It's parked/abandoned, so it can be overtaken
+        
+        return vehicle_wp, False  # It's stopped for a legitimate traffic reason
+    
+
+    def _affected_by_sign(self, vehicle : carla.Vehicle, sign_type : str = "206", max_distance : float = None):
+        '''
+        This method checks if the vehicle is affected by a stop sign of a specific type.
+        Default type is "206", which is the type of the stop sign.
+        
+            :param vehicle (carla.Vehicle): vehicle to check if it is affected by a stop sign
+            :param sign_type (str): type of the stop sign
+            :param max_distance (float): max distance for stop signs to be considered relevant.
+            
+            :return (bool, carla.Actor): a tuple containing a boolean indicating if the vehicle is affected by a stop sign
+        '''
+        
+        if self._ignore_stop_signs:
+            return False, None
+
+        if max_distance is None:
+            max_distance = 20
+
+        # defines the last traffic light to which pay attention - case there is no sign registered
+        target_vehicle_wp = self._map.get_waypoint(vehicle.get_location())
+        signs_list = target_vehicle_wp.get_landmarks_of_type(max_distance, type=sign_type, stop_at_junction=False)
+
+        # stop sign
+        if sign_type == '206':
+            signs_list = [sign for sign in signs_list if
+                          self._map.get_waypoint(vehicle.get_location()).lane_id == sign.waypoint.lane_id]
+
+            if signs_list:
+                return True, signs_list[0]  # return type Landmark
+
+        return False, None
 
     

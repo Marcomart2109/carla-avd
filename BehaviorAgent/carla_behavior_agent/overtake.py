@@ -188,7 +188,7 @@ class Overtake(BasicAgent):
         # Get the list of parked vehicles in the simulation at a distance of 'max_distance' from the ego vehicle.
         vehicle_list = [
             v for v in vehicle_list
-            if self._parked_vehicle(v)[1] == True
+            if self.is_vehicle_legitimately_stopped(v)[1] == True
         ]
         
         previous_vehicle = actor

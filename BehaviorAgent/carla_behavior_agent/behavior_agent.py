@@ -252,8 +252,39 @@ class BehaviorAgent(BasicAgent):
             self._lateral_offset_active = False
                 
 
-        # 2.2: Car following behaviors
+        #############################################
+        ######## Vehicle Avoidance Behaviors ########
+        #############################################
+        # 1: Check for stop signs
+        stop_sign_state, stop_sign, stop_sign_distance = self.stop_sign_manager(self._vehicle)
+        if stop_sign_state:
+            # Distance is computed from the center of the car and the stop sign,
+            # we use bounding boxes to calculate the actual distance
+            distance = stop_sign_distance
+            msg = f"[DEBUG - Stop Sign Avoidance] Stop sign {stop_sign} detected, distance: {distance}"
+            print(msg)
+            self.logger.debug(msg)
+
+            # Slow down if the stop sign is getting closer
+            if distance < 2 * self._behavior.braking_distance:
+                self.set_target_speed(self._approach_speed)
+                msg = f"[INFO - Stop Sign Avoidance] Target speed set to:{self._approach_speed}\n[INFO] Distance to stop sign: {distance}"
+                print(msg)
+                
+                # # Complete stop only if extremely close
+                # if distance < self._behavior.braking_distance:
+                #     msg = "[WARNING - Stop Sign Avoidance] Emergency stop due to stop sign proximity"
+                #     print(msg)
+                #     self.logger.critical(msg)
+                #     return self.emergency_stop()
+                
+                # return self._local_planner.run_step()
+
+
+
+        # 2: Check for vehicles
         vehicle_state, vehicle, distance = self.collision_and_car_avoid_manager(ego_vehicle_wp)
+
 
         if vehicle_state:
             # Distance is computed from the center of the two cars,
@@ -261,6 +292,25 @@ class BehaviorAgent(BasicAgent):
             distance = distance - max(
                 vehicle.bounding_box.extent.y, vehicle.bounding_box.extent.x) - max(
                     self._vehicle.bounding_box.extent.y, self._vehicle.bounding_box.extent.x)
+            
+            # Check if the car is legitimately stopped
+            vehicle_wp, is_abandoned = self.is_vehicle_legitimately_stopped(vehicle)
+            msg = f"[DEBUG - Vehicle Avoidance] Vehicle {vehicle} detected, distance: {distance}, is it abandoned? {is_abandoned}"
+            print(msg)
+            self.logger.debug(msg)
+
+            if is_abandoned:
+                # If the vehicle is considered parked/abandoned, we can overtake it
+                msg = f"[DEBUG - Vehicle Avoidance] Vehicle {vehicle} is parked/abandoned, overtaking."
+                print(msg)
+                self.logger.debug(msg)
+                overtake_path = self._overtake.run_step(
+                    object_to_overtake=vehicle, ego_vehicle_wp=ego_vehicle_wp, distance_same_lane=1, distance_from_object=distance, speed_limit = self._speed_limit
+                )
+                if overtake_path:
+                    self.__update_global_plan(overtake_path=overtake_path)
+                if not self._overtake.in_overtake:
+                    return self.emergency_stop()
 
             # Emergency brake if the car is very close.
             if distance < self._behavior.braking_distance:
@@ -318,9 +368,22 @@ class BehaviorAgent(BasicAgent):
         """
         actor_list = self._world.get_actors()
         lights_list = actor_list.filter("*traffic_light*")
-        affected, _ = self._affected_by_traffic_light(lights_list)
+        affected, _ = self._affected_by_traffic_light(self._vehicle, lights_list)
 
         return affected
+    
+    def stop_sign_manager(self, vehicle : carla.Vehicle, sign_distance : int = 20) -> bool:
+        """
+        This method is in charge of behaviors for stop signs.
+        
+            :param vehicle (carla.Vehicle): vehicle object to be checked.
+            :param sign_distance (int): distance to the stop sign.
+            
+            :return affected (bool): True if the vehicle is affected by the stop sign, False otherwise.
+        """
+        affected, signal = self._affected_by_sign(vehicle=vehicle, sign_type="206", max_distance=sign_distance)
+        distance = -1 if not affected else dist(a=vehicle, b=signal)
+        return affected, signal, distance
 
     def _tailgating(self, waypoint, vehicle_list):
         """
