@@ -123,6 +123,20 @@ class BasicAgent(object):
         self._target_speed = speed
         self._local_planner.set_speed(speed)
 
+    def get_speed(self):
+        """
+        Returns the current speed of the vehicle
+            :return: speed in Km/h
+        """
+        return get_speed(self._vehicle) / 3.6
+
+    def get_target_speed(self):
+        """
+        Returns the target speed of the vehicle
+            :return: target speed in Km/h
+        """
+        return self._target_speed
+
     def follow_speed_limits(self, value=True):
         """
         If active, the agent will dynamically change the target speed according to the speed limits

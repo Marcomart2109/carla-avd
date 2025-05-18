@@ -90,7 +90,11 @@ class MyTeamAgent(AutonomousAgent):
                 return carla.VehicleControl()
             
             self._agent = BehaviorAgent(hero_actor, opt_dict=self.configs)
-
+            
+            # Imposta lo streamer nel BehaviorAgent se disponibile
+            if self.__show and hasattr(self, 'showServer'):
+                self._agent.set_streamer(self.showServer)
+    
             plan = [(CarlaDataProvider.get_map().get_waypoint(x[0].location),x[1]) for x in self._global_plan_world_coord]
 
             self._agent.set_global_plan(plan)
@@ -119,4 +123,3 @@ class MyTeamAgent(AutonomousAgent):
         print("DESTROY")
         if self._agent:
             self._agent.reset()
-            

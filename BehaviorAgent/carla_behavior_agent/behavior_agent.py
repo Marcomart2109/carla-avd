@@ -70,20 +70,42 @@ class BehaviorAgent(BasicAgent):
         # Aggiungi una variabile per tenere traccia dello stato dell'offset laterale
         self._lateral_offset_active = False
 
+        # Configurazione standard del logger
         self.logger = logging.getLogger('behavior_agent')
         self.logger.setLevel(logging.DEBUG)
 
-        # Create a file handler
-        file_handler = logging.FileHandler('./carla_behavior_agent/logs/behavior_agent.log', mode = "w")
+        # Assicurati che la directory dei log esista
+        import os
+        log_dir = './carla_behavior_agent/logs/'
+        os.makedirs(log_dir, exist_ok=True)
+
+        # Create a file handler with rotation
+        from logging.handlers import RotatingFileHandler
+        file_handler = RotatingFileHandler(
+            f'{log_dir}behavior_agent.log',
+            maxBytes=5*1024*1024,
+            backupCount=5,
+            mode="w"
+        )
         file_handler.setLevel(logging.DEBUG)
 
         # Create a formatter and set it for the handler
         self.formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
         file_handler.setFormatter(self.formatter)
+        
         # Add the handler to the logger 
         self.logger.addHandler(file_handler)
+        
+        # Imposta propagate a False per evitare log duplicati
+        self.logger.propagate = False
 
         self.logger.info(f"Behavior agent initialized with behavior: {behavior}")
+    
+        # Riferimento allo streamer (da impostare esternamente)
+        self._streamer = None
+        
+        # Aggiungi un log di test (verrà inviato quando viene impostato lo streamer)
+        self._test_log_sent = False
 
     ################################
     ########### RUN STEP ###########
@@ -173,8 +195,9 @@ class BehaviorAgent(BasicAgent):
             self.logger.critical(msg)
 
 
-            msg = f"[DEBUG - Static Obstacle Avoidance] Static obstacle detected, distance: {distance}"
-            print(msg)
+            msg = f"Static obstacle detected, distance: {distance}"
+            print(f"[DEBUG - Static Obstacle Avoidance] {msg}")
+            self.send_log("OBSTACLE", msg, "DEBUG")
 
             overtake_path = self._overtake.run_step(
                 object_to_overtake=static_obstacle, ego_vehicle_wp=ego_vehicle_wp, distance_same_lane=1, distance_other_lane=20, distance_from_object=so_distance, speed_limit = self._speed_limit
@@ -443,6 +466,8 @@ class BehaviorAgent(BasicAgent):
         lights_list = actor_list.filter("*traffic_light*")
         affected, _ = self._affected_by_traffic_light(self._vehicle, lights_list)
 
+        if affected:
+            self.send_log("TRAFFIC_LIGHT", "Red light detected, stopping", "WARNING")
         return affected
     
     def stop_sign_manager(self, vehicle : carla.Vehicle, sign_distance : int = 20) -> bool:
@@ -517,7 +542,10 @@ class BehaviorAgent(BasicAgent):
             return False, None, -1
         
         bicycle_list = sorted(bicycle_list, key=lambda x: dist(x, waypoint))
-        return True, bicycle_list[0], dist(bicycle_list[0], waypoint)
+        bike_state = True
+        distance = dist(bicycle_list[0], waypoint)
+        self.send_log("BICYCLE", f"Bicycle detected at distance {distance:.2f}m", "WARNING")
+        return bike_state, bicycle_list[0], distance
 
     def collision_and_car_avoid_manager(self, waypoint):
         """
@@ -557,6 +585,8 @@ class BehaviorAgent(BasicAgent):
                     and self._behavior.tailgate_counter == 0:
                 self._tailgating(waypoint, vehicle_list)
 
+        if vehicle_state:
+            self.send_log("VEHICLE", f"Vehicle detected ahead at distance {distance:.2f}m", "INFO")
         return vehicle_state, vehicle, distance
 
     def pedestrian_avoid_manager(self, waypoint):
@@ -587,6 +617,8 @@ class BehaviorAgent(BasicAgent):
             walker_state, walker, distance = self._vehicle_obstacle_detected(walker_list, max(
                 self._behavior.min_proximity_threshold, self._speed_limit / 3), up_angle_th=60)
 
+        if walker_state:
+            self.send_log("PEDESTRIAN", f"Pedestrian detected at distance {distance:.2f}m", "WARNING")
         return walker_state, walker, distance
 
     def car_following_manager(self, vehicle, distance, debug=False):
@@ -674,6 +706,8 @@ class BehaviorAgent(BasicAgent):
             props, max(self._behavior.min_proximity_threshold, self._speed_limit / 2), up_angle_th=60
         )
 
+        if o_state:
+            self.send_log("OBSTACLE", f"Static obstacle detected at distance {o_distance:.2f}m", "INFO")
         return o_state,o, o_distance
 
     
@@ -689,3 +723,36 @@ class BehaviorAgent(BasicAgent):
         self.set_target_speed(2 * self._speed_limit)
         # Set the global plan of the agent.
         self.set_global_plan(new_plan)
+
+    def set_streamer(self, streamer):
+        """Imposta lo streamer per l'invio dei log al server Flask"""
+        self._streamer = streamer
+    
+        # Reset dei log quando si imposta lo streamer
+        if self._streamer:
+            self._streamer.reset_logs()
+            
+        # Invia un log di test per verificare il funzionamento
+        if not self._test_log_sent:
+            self.send_log("SYSTEM", "BehaviorAgent initialized and connected to streamer", "INFO")
+            self._test_log_sent = True
+
+    def send_log(self, category, message, level="INFO"):
+        """
+        Invia un log sia al file di log che allo streamer (se disponibile)
+        """
+        # Log al file normale
+        if level == "DEBUG":
+            self.logger.debug(message)
+        elif level == "INFO":
+            self.logger.info(message)
+        elif level == "WARNING":
+            self.logger.warning(message)
+        elif level == "ERROR":
+            self.logger.error(message)
+        elif level == "CRITICAL":
+            self.logger.critical(message)
+            
+        # Log allo streamer se disponibile
+        if self._streamer:
+            self._streamer.add_log(category, message, level)
