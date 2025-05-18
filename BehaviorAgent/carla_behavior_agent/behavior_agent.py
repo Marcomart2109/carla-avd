@@ -229,49 +229,114 @@ class BehaviorAgent(BasicAgent):
         ######### Bicycle Avoidance Behaviors ##########
         ################################################
         bicycle_state, bicycle, b_distance = self.bycicle_avoid_manager(ego_vehicle_wp)
+        
         if bicycle_state:
-            # Distance is computed from the center of the car and the bicycle,
-            # we use bounding boxes to calculate the actual distance
-            # Get the yaw of the ego vehicle and the vehicle in front.
-            ego_yaw = abs(self._vehicle.get_transform().rotation.yaw)
-            vehicle_yaw = abs(bicycle.get_transform().rotation.yaw)
-            
-            # Check if the vehicles are approximately aligned
-            if abs(ego_yaw - vehicle_yaw) < 10:                   
-                # Check if the bicycle is near the center of the lane. In this case, the agent will overtake the bicycle.
-                if is_bicycle_near_center(vehicle_location=bicycle.get_location(), ego_vehicle_wp=ego_vehicle_wp) and get_speed(self._vehicle) < 0.1:
-                    print("--- Bicycle is near the center of the lane! We can try to overtake it.")
+            # Ottieni l'ID della corsia del veicolo ego e della bicicletta
+            ego_lane_id = ego_vehicle_wp.lane_id
+            bicycle_wp = self._map.get_waypoint(bicycle.get_location())
+            bicycle_lane_id = bicycle_wp.lane_id
 
-                    overtake_path = self._overtake.run_step(
-                        object_to_overtake=bicycle, ego_vehicle_wp=ego_vehicle_wp, distance_same_lane=1, distance_from_object=b_distance, speed_limit = self._speed_limit
-                    )                                               
-                    if overtake_path:
-                        self.__update_global_plan(overtake_path=overtake_path)
-                    if not self._overtake.in_overtake:
-                        return self.emergency_stop()
-                # If the bicycle is not near the center of the lane, the agent will follow the lane. In particular, the agent will offset 
-                # the vehicle if the road is straight.
-                else:
-                    print("--- Bicycle is not near the center of the lane! We can move of an offset to avoid it.")
-                    new_offset = -(2.5 * bicycle.bounding_box.extent.y + self._vehicle.bounding_box.extent.y)
-                    self._local_planner.set_lateral_offset(new_offset)
-                    self._lateral_offset_active = True
-                    target_speed = min([
-                        self._behavior.max_speed,
-                        self._speed_limit - self._behavior.speed_lim_dist])
-                    self._local_planner.set_speed(target_speed)
-                    control = self._local_planner.run_step(debug=debug)
-            elif get_speed(bicycle) < 1:
-                # Set the target speed of the agent.
-                print("--- Bicycle is not moving! We decelerate.")
-                self.set_target_speed(self._approach_speed)
-                return self._local_planner.run_step()
+            # Get the yaw of the ego vehicle and the vehicle in front.
+            ego_current_yaw = self._vehicle.get_transform().rotation.yaw # Mantenere il segno per calcoli di angolo più precisi se necessario
+            bicycle_current_yaw = bicycle.get_transform().rotation.yaw
+
+            # Calcola la differenza di yaw, normalizzandola tra -180 e 180
+            diff_yaw = (bicycle_current_yaw - ego_current_yaw + 180) % 360 - 180
+            
+            # Definisci una soglia per considerare una bicicletta "allineata" (es. +/- 20 gradi)
+            # e una soglia per considerarla "attraversante" (es. al di fuori di +/- 45 gradi dalla direzione opposta)
+            is_aligned_threshold = 20  # Gradi
+            is_crossing_threshold = 45 # Gradi (per rilevare attraversamenti più diretti)
+
+            # Controlla se i veicoli sono approssimativamente allineati (stessa direzione di marcia o quasi)
+            if abs(diff_yaw) < is_aligned_threshold:                   
+                # Controlla se la bicicletta è nella STESSA corsia del veicolo ego
+                if ego_lane_id == bicycle_lane_id:
+                    self.logger.info(f"Bicycle {bicycle.id} detected in the SAME lane ({ego_lane_id}), aligned. Distance: {b_distance:.2f}m.")
+                    print(f"--- Bicycle {bicycle.id} detected in the same lane, aligned.")
+                    # Controlla se la bicicletta è vicina al centro della corsia. In questo caso, l'agente sorpasserà la bicicletta.
+                    if is_bicycle_near_center(vehicle_location=bicycle.get_location(), ego_vehicle_wp=ego_vehicle_wp) and get_speed(self._vehicle) < 0.1:
+                        self.logger.info(f"Bicycle {bicycle.id} is near the center of our lane. Attempting to overtake.")
+                        print("--- Bicycle is near the center of the lane! We can try to overtake it.")
+
+                        overtake_path = self._overtake.run_step(
+                            object_to_overtake=bicycle, ego_vehicle_wp=ego_vehicle_wp, distance_same_lane=1, distance_from_object=b_distance, speed_limit = self._speed_limit
+                        )                                               
+                        if overtake_path:
+                            self.logger.info(f"Overtake path found for bicycle {bicycle.id}.")
+                            self.__update_global_plan(overtake_path=overtake_path)
+                        if not self._overtake.in_overtake: 
+                             self.logger.warning(f"Overtake of bicycle {bicycle.id} not active. Emergency stop.")
+                             print(f"--- Overtake of bicycle {bicycle.id} not active. Emergency stop.")
+                             return self.emergency_stop()
+                    else: 
+                        self.logger.info(f"Bicycle {bicycle.id} is in our lane, but off-center. Applying lateral offset.")
+                        print("--- Bicycle is in our lane, not centered. Applying lateral offset to avoid it.")
+                        new_offset = -(2.5 * bicycle.bounding_box.extent.y + self._vehicle.bounding_box.extent.y)
+                        self._local_planner.set_lateral_offset(new_offset)
+                        self._lateral_offset_active = True
+                        target_speed = min([
+                            self._behavior.max_speed,
+                            self._speed_limit - self._behavior.speed_lim_dist])
+                        self._local_planner.set_speed(target_speed)
+                        control = self._local_planner.run_step(debug=debug)
+                else: # La bicicletta è allineata (stessa direzione) ma in una corsia DIVERSA
+                    self.logger.info(f"Bicycle {bicycle.id} detected in a different lane (Ego: {ego_lane_id}, Bicycle: {bicycle_lane_id}), aligned. No offset applied.")
+                    print(f"--- Bicycle detected in a different lane (Ego: {ego_lane_id}, Bicycle: {bicycle_lane_id}), aligned. No offset applied.")
+                    if self._lateral_offset_active:
+                        self.logger.info("Resetting previously active lateral offset as current bicycle is in a different lane.")
+                        print("--- Resetting previously active lateral offset.")
+                        self._local_planner.set_lateral_offset(0.0)
+                        self._lateral_offset_active = False
+            
+            # CASO: Bicicletta NON allineata (potenzialmente attraversante o in direzione opposta)
             else:
-                print("--- Road is not straight! We follow it until the road is straight.")
-                control = self.car_following_manager(bicycle, b_distance, debug=debug)
-        elif self._lateral_offset_active:
-            # Resetta l'offset solo se era attivo e non ci sono più biciclette
-            print("--- No bicycle detected, resetting lateral offset to 0")
+                self.logger.info(f"Bicycle {bicycle.id} is NOT ALIGNED (yaw_diff: {diff_yaw:.1f} deg). Distance: {b_distance:.2f}m. Speed: {get_speed(bicycle):.1f} km/h.")
+                print(f"--- Bicycle {bicycle.id} is NOT ALIGNED (yaw_diff: {diff_yaw:.1f} deg). Distance: {b_distance:.2f}m.")
+
+                # Verifica se la bicicletta sta effettivamente attraversando la nostra traiettoria
+                # Questo è un controllo semplificato. Una predizione di traiettoria sarebbe più robusta.
+                # Consideriamo "attraversante" se non è né allineata né in direzione opposta quasi parallela.
+                is_potentially_crossing = abs(diff_yaw) > is_aligned_threshold and abs(abs(diff_yaw) - 180) > is_aligned_threshold 
+
+                if is_potentially_crossing and b_distance < self._behavior.braking_distance * 3: # Distanza di sicurezza per reagire
+                    self.logger.warning(f"Bicycle {bicycle.id} is potentially CROSSING at {b_distance:.2f}m. Initiating emergency stop or significant slowdown.")
+                    print(f"--- Bicycle {bicycle.id} is potentially CROSSING at {b_distance:.2f}m. EMERGENCY STOP / SLOWDOWN.")
+                    
+                    # Se molto vicina, arresto di emergenza completo
+                    if b_distance < self._behavior.braking_distance * 1.5:
+                         self.logger.critical(f"Bicycle {bicycle.id} CRITICAL proximity while crossing. EMERGENCY STOP.")
+                         return self.emergency_stop()
+                    else:
+                        # Altrimenti, rallenta drasticamente per valutare meglio
+                        target_speed = min(self._approach_speed / 2, get_speed(self._vehicle) / 2) # Rallenta significativamente
+                        target_speed = max(target_speed, 0) # Non andare in retromarcia
+                        self.set_target_speed(target_speed)
+                        self.logger.info(f"Slowing down significantly to {target_speed:.1f} km/h for crossing bicycle.")
+                        control = self._local_planner.run_step(debug=debug)
+
+                elif get_speed(bicycle) < 1 and b_distance < self._behavior.braking_distance * 2: # Non allineata, lenta/ferma e vicina
+                    self.logger.info(f"Bicycle {bicycle.id} is not aligned, slow/stopped, and close. Decelerating to approach speed.")
+                    print("--- Bicycle is not aligned, slow/stopped, and close. Decelerating.")
+                    self.set_target_speed(self._approach_speed)
+                    control = self._local_planner.run_step(debug=debug)
+                
+                else: # Bicicletta non allineata, ma più lontana o in movimento in modo non immediatamente critico
+                      # In questo caso, potrebbe essere una bicicletta sul lato opposto della strada che si allontana
+                      # o una che ha già attraversato. Mantenere una velocità prudente.
+                    self.logger.info(f"Bicycle {bicycle.id} not aligned, but not an immediate crossing threat. Maintaining cautious speed.")
+                    print("--- Bicycle not aligned, but not an immediate crossing threat. Maintaining cautious speed.")
+                    # Non fare nulla di specifico qui lascerebbe il controllo al comportamento di default successivo
+                    # Oppure, si potrebbe impostare una velocità leggermente ridotta per precauzione
+                    # target_speed = min(self._speed_limit - self._behavior.speed_lim_dist, self._behavior.max_speed)
+                    # self._local_planner.set_speed(target_speed)
+                    # control = self._local_planner.run_step(debug=debug)
+                    # Per ora, lasciamo che la logica di fallback gestisca questo,
+                    # ma se 'control' non è ancora impostato, verrà gestito dal car_following o dal lane_following.
+
+        elif self._lateral_offset_active: # Nessuna bicicletta rilevata, ma l'offset era attivo
+            self.logger.info("No bicycle detected. Resetting previously active lateral offset.")
+            print("--- No bicycle detected, resetting lateral offset to 0") # Messaggio originale
             self._local_planner.set_lateral_offset(0.0)
             self._lateral_offset_active = False
                 
@@ -372,25 +437,34 @@ class BehaviorAgent(BasicAgent):
                     # is responsible for checking oncoming traffic and aborting if necessary by changing the global plan.
                     
                     current_actual_speed_limit = self._vehicle.get_speed_limit()
-                    # Define a desired margin, e.g., 10 km/h over the speed limit for overtaking.
-                    # This could be a parameter in self._behavior.
+                    
+                    effective_max_speed = self._behavior.max_speed
                     overtake_speed_margin_kmh = getattr(self._behavior, 'overtake_speed_margin_kmh', 10.0) 
+
+                    # If current behavior is Cautious, consider using Normal's speed parameters for a more effective overtake.
+                    if isinstance(self._behavior, Cautious):
+                        # Create a temporary Normal behavior instance to access its parameters
+                        temp_normal_behavior = Normal()
+                        overtake_speed_margin_kmh = getattr(temp_normal_behavior, 'overtake_speed_margin_kmh', 10.0) # Use Normal's margin
+                        effective_max_speed = temp_normal_behavior.max_speed # Use Normal's max_speed
+                        self.logger.info("Overtake: Current behavior is Cautious. Using Normal's speed parameters for overtake.")
+                        print("--- Overtake: Current behavior is Cautious. Using Normal's speed parameters for overtake.")
                     
                     desired_overtake_speed = current_actual_speed_limit + overtake_speed_margin_kmh
                     
                     # Ensure target speed is at least the current speed limit (if not already exceeding it)
-                    # and not more than max_speed.
-                    target_speed = min(self._behavior.max_speed, desired_overtake_speed)
+                    # and not more than effective_max_speed.
+                    target_speed = min(effective_max_speed, desired_overtake_speed)
                     target_speed = max(target_speed, current_actual_speed_limit) # Ensure at least speed limit
 
-                    current_speed_kmh = get_speed(self._vehicle) * 3.6
+                    current_speed_kmh = get_speed(self._vehicle)
                     # If just starting the overtake and current speed is well below the desired overtake speed,
                     # ensure the target_speed encourages acceleration.
                     # If already moving fast, maintain speed or adjust to target_speed.
                     if overtake_path_generated_this_step and current_speed_kmh < target_speed:
                         pass # target_speed is already set to encourage acceleration
                     elif current_speed_kmh > target_speed and self._overtake.in_overtake : # if already faster than calculated target during overtake
-                         target_speed = min(self._behavior.max_speed, current_speed_kmh) # maintain current speed if safe, capped by max_speed
+                         target_speed = min(effective_max_speed, current_speed_kmh) # maintain current speed if safe, capped by max_speed
 
                     self._local_planner.set_speed(target_speed)
                     msg = f"[INFO - Overtake] Active overtake. Target speed: {target_speed:.2f} km/h. Current speed: {current_speed_kmh:.2f} km/h. Limit: {current_actual_speed_limit:.2f} km/h."
@@ -536,7 +610,7 @@ class BehaviorAgent(BasicAgent):
         
         vehicle_list = self._world.get_actors().filter("*vehicle*")
         bicycle_list = [v for v in vehicle_list if v.type_id in BICYCLES_ID]
-        bicycle_list = [b for b in bicycle_list if is_within_distance(b.get_transform(), self._vehicle.get_transform(), 30, angle_interval=[0, 90])]
+        bicycle_list = [b for b in bicycle_list if is_within_distance(b.get_transform(), self._vehicle.get_transform(), 7, angle_interval=[0, 90])]
             
         if not bicycle_list or len(bicycle_list) == 0:
             return False, None, -1

@@ -513,7 +513,7 @@ class BasicAgent(object):
             return (False, None, -1)
 
         return (False, None, -1)
-
+    
     def _generate_lane_change_path(self, 
                                    waypoint: carla.Waypoint, 
                                    direction: str = 'left',
@@ -673,50 +673,47 @@ class BasicAgent(object):
         This method determines if a vehicle is stopped for a legitimate traffic reason or if it's
         parked/abandoned and therefore can be overtaken.
         
-        The method checks various conditions to determine if a vehicle is stopped due to
-        traffic conditions (such as a red light, stop sign, or junction) or if it's simply
-        parked or abandoned on the road.
-        
         :param vehicle: The vehicle to evaluate
         
         :return: A tuple containing:
             - vehicle_wp (carla.Waypoint): waypoint of the evaluated vehicle
             - is_abandoned (bool): True if the vehicle is considered parked/abandoned (and therefore overtakable),
-              False if the vehicle is stopped for a legitimate traffic reason
+            False if the vehicle is stopped for a legitimate traffic reason
         '''
-        # Get vehicle location and waypoint
         vehicle_loc = vehicle.get_location()
         vehicle_wp = self._map.get_waypoint(vehicle_loc)
 
-        # Get nearby traffic lights
-        lights_list = self._world.get_actors().filter("*traffic_light*")
-        lights_list = [l for l in lights_list if is_within_distance(l.get_transform(), vehicle.get_transform(), 50, angle_interval=[0, 90])]
+        # Get nearby traffic lights relevant to the 'vehicle' being checked
+        lights_list_for_vehicle = self._world.get_actors().filter("*traffic_light*")
+        lights_list_for_vehicle = [
+            l for l in lights_list_for_vehicle 
+            if is_within_distance(l.get_transform(), vehicle.get_transform(), 50, angle_interval=[0, 90])
+        ]
 
-        # Check if the vehicle is affected by a stop sign or by a traffic light
-        affected_by_traffic_light, _ = self._affected_by_traffic_light(self._vehicle)
-        affected_by_stop_sign, _ = self._affected_by_sign(self._vehicle)
+        # Check if the 'vehicle' (not self._vehicle) is affected by a stop sign or by a traffic light
+        # Pass 'vehicle' and its relevant 'lights_list_for_vehicle'
+        affected_by_traffic_light, _ = self._affected_by_traffic_light(vehicle, lights_list_for_vehicle) 
+        affected_by_stop_sign, _ = self._affected_by_sign(vehicle) # Pass 'vehicle'
 
-        # If the ego vehicle is not affected by signage, check surrounding vehicles
-        if not affected_by_stop_sign or not affected_by_traffic_light:
-            vehicle_list = self._get_ordered_vehicles(vehicle, 30)
-            for v in vehicle_list:
-                if v.id == self._vehicle.id:
-                    continue
-                affected_by_traffic_light, _ = self._affected_by_traffic_light(v)
-                affected_by_stop_sign, _ = self._affected_by_sign(v)
-                if affected_by_stop_sign or affected_by_traffic_light:
-                    break
-
-        # A vehicle is considered parked/abandoned if:
+        # Simplified logic: A vehicle is considered parked/abandoned if:
         # - It's practically stopped (speed < 0.1 km/h)
-        # - It's not affected by a stop sign
-        # - It's not affected by a traffic light
-        # - It's not in a junction
-        # - There are no traffic lights nearby
-        if get_speed(vehicle) < 0.1 and not affected_by_stop_sign and not affected_by_traffic_light and not vehicle_wp.is_junction and not lights_list:
-            return vehicle_wp, True  # It's parked/abandoned, so it can be overtaken
+        # - It's not affected by a stop sign (pertaining to 'vehicle')
+        # - It's not affected by a traffic light (pertaining to 'vehicle')
+        # - It's not in a junction (unless it's stopped for a light/sign at the junction, covered above)
+        # The check for 'not lights_list_for_vehicle' might be too strict if a green light is present.
+        # The primary check is 'not affected_by_traffic_light' (which implies red light).
+
+        if get_speed(vehicle) < 0.1 and \
+        not affected_by_stop_sign and \
+        not affected_by_traffic_light and \
+        not vehicle_wp.is_junction:
+            # Further check: if it's not in a junction but stopped, and no red light or stop sign,
+            # it's likely abandoned. If it IS in a junction, it must be clear of lights/signs.
+            return vehicle_wp, True  # It's parked/abandoned
         
-        return vehicle_wp, False  # It's stopped for a legitimate traffic reason
+        # If the vehicle is moving, or stopped for a traffic light/sign, or stopped in a junction
+        # (and not cleared by the above as abandoned), it's not considered abandoned.
+        return vehicle_wp, False  # It's stopped for a legitimate traffic reason or moving
     
 
     def _affected_by_sign(self, vehicle : carla.Vehicle, sign_type : str = "206", max_distance : float = None):
