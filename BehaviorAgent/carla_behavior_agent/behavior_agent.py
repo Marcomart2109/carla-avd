@@ -18,6 +18,7 @@ from behavior_types import Cautious, Aggressive, Normal
 from overtake import Overtake 
 from misc import *
 import logging
+import time
 
 class BehaviorAgent(BasicAgent):
     """
@@ -106,6 +107,17 @@ class BehaviorAgent(BasicAgent):
         
         # Aggiungi un log di test (verrà inviato quando viene impostato lo streamer)
         self._test_log_sent = False
+
+        # Tracciamento oggetti per evitare log duplicati
+        self._logged_objects = {
+            "pedestrian": {},
+            "bicycle": {},
+            "vehicle": {},
+            "obstacle": {},
+            "traffic_light": False,
+            "stop_sign": {}
+        }
+        self._log_timeout = 5.0  # Secondi prima di poter loggare nuovamente lo stesso oggetto
 
     ################################
     ########### RUN STEP ###########
@@ -197,7 +209,6 @@ class BehaviorAgent(BasicAgent):
 
             msg = f"Static obstacle detected, distance: {distance}"
             print(f"[DEBUG - Static Obstacle Avoidance] {msg}")
-            self.send_log("OBSTACLE", msg, "DEBUG")
 
             overtake_path = self._overtake.run_step(
                 object_to_overtake=static_obstacle, ego_vehicle_wp=ego_vehicle_wp, distance_same_lane=1, distance_other_lane=20, distance_from_object=so_distance, speed_limit = self._speed_limit
@@ -541,7 +552,12 @@ class BehaviorAgent(BasicAgent):
         affected, _ = self._affected_by_traffic_light(self._vehicle, lights_list)
 
         if affected:
-            self.send_log("TRAFFIC_LIGHT", "Red light detected, stopping", "WARNING")
+            if self._should_log_object("traffic_light"):
+                self.send_log("TRAFFIC_LIGHT", "Red light detected", "WARNING")
+        else:
+            # Reset quando non siamo più influenzati dal semaforo
+            self._logged_objects["traffic_light"] = False
+            
         return affected
     
     def stop_sign_manager(self, vehicle : carla.Vehicle, sign_distance : int = 20) -> bool:
@@ -614,11 +630,14 @@ class BehaviorAgent(BasicAgent):
             
         if not bicycle_list or len(bicycle_list) == 0:
             return False, None, -1
-        
+    
         bicycle_list = sorted(bicycle_list, key=lambda x: dist(x, waypoint))
         bike_state = True
         distance = dist(bicycle_list[0], waypoint)
-        self.send_log("BICYCLE", f"Bicycle detected at distance {distance:.2f}m", "WARNING")
+        
+        if self._should_log_object("bicycle", bicycle_list[0].id):
+            self.send_log("BICYCLE", "Bicycle detected", "WARNING")
+        
         return bike_state, bicycle_list[0], distance
 
     def collision_and_car_avoid_manager(self, waypoint):
@@ -660,7 +679,9 @@ class BehaviorAgent(BasicAgent):
                 self._tailgating(waypoint, vehicle_list)
 
         if vehicle_state:
-            self.send_log("VEHICLE", f"Vehicle detected ahead at distance {distance:.2f}m", "INFO")
+            if self._should_log_object("vehicle", vehicle.id):
+                self.send_log("VEHICLE", "Vehicle detected ahead", "INFO")
+    
         return vehicle_state, vehicle, distance
 
     def pedestrian_avoid_manager(self, waypoint):
@@ -692,7 +713,9 @@ class BehaviorAgent(BasicAgent):
                 self._behavior.min_proximity_threshold, self._speed_limit / 3), up_angle_th=60)
 
         if walker_state:
-            self.send_log("PEDESTRIAN", f"Pedestrian detected at distance {distance:.2f}m", "WARNING")
+            if self._should_log_object("pedestrian", walker.id):
+                self.send_log("PEDESTRIAN", "Pedestrian detected", "WARNING")
+    
         return walker_state, walker, distance
 
     def car_following_manager(self, vehicle, distance, debug=False):
@@ -762,9 +785,7 @@ class BehaviorAgent(BasicAgent):
 
     def static_obstacle_avoid_manager(self, waypoint, obj_filter="*static.prop*"):
         """
-        Handles avoidance behavior for static obstacles such as signs,
-        barriers, or construction props. Attempts lane changes if possible;
-        otherwise, performs an emergency stop only if the obstacle is blocking the lane.
+        Handles avoidance behavior for static obstacles.
         """
         # Filter relevant static props
         props = self._world.get_actors().filter(obj_filter)
@@ -781,8 +802,10 @@ class BehaviorAgent(BasicAgent):
         )
 
         if o_state:
-            self.send_log("OBSTACLE", f"Static obstacle detected at distance {o_distance:.2f}m", "INFO")
-        return o_state,o, o_distance
+            if self._should_log_object("obstacle", o.id):
+                self.send_log("OBSTACLE", "Static obstacle detected", "INFO")
+    
+        return o_state, o, o_distance
 
     
     def __update_global_plan(self, overtake_path : list) -> None:
@@ -830,3 +853,30 @@ class BehaviorAgent(BasicAgent):
         # Log allo streamer se disponibile
         if self._streamer:
             self._streamer.add_log(category, message, level)
+
+    def _should_log_object(self, category, object_id=None):
+        """
+        Determina se un oggetto dovrebbe essere loggato, evitando duplicati.
+        
+        Args:
+            category: Categoria dell'oggetto (pedestrian, bicycle, vehicle, obstacle, ecc.)
+            object_id: ID dell'oggetto, None per oggetti senza ID
+        
+        Returns:
+            bool: True se l'oggetto deve essere loggato, False altrimenti
+        """
+        current_time = time.time()
+        
+        # Per oggetti booleani (es. traffic light)
+        if object_id is None:
+            if not self._logged_objects[category]:
+                self._logged_objects[category] = True
+                return True
+            return False
+        
+        # Per oggetti con ID
+        if object_id not in self._logged_objects[category] or \
+           current_time - self._logged_objects[category][object_id] > self._log_timeout:
+            self._logged_objects[category][object_id] = current_time
+            return True
+        return False

@@ -31,6 +31,7 @@ class ServerData:
         self.logs_lock = threading.Lock()
         
         self.__record_file = "Speed.txt"
+        self.__last_clear_timestamp = time.time()  # Timestamp per l'ultimo clear
         
     def __record_data(self, data):
         if self.__record_file is not None:
@@ -77,12 +78,13 @@ class ServerData:
         return self.__controls
         
     def setLogs(self, logs):
-        """Aggiunge nuovi log alla coda"""
+        """Aggiunge nuovi log alla coda, ignorando quelli più vecchi del clear"""
         self.logs_lock.acquire()
         for log in logs:
-            # Aggiungi timestamp formattato per la visualizzazione
-            log["formatted_time"] = time.strftime("%H:%M:%S", time.localtime(log["timestamp"]))
-            self.__logs.append(log)
+            # Aggiungi solo se il log è più recente dell'ultimo clear
+            if log["timestamp"] > self.__last_clear_timestamp:
+                log["formatted_time"] = time.strftime("%H:%M:%S", time.localtime(log["timestamp"]))
+                self.__logs.append(log)
         self.logs_lock.release()
         
     def getLogs(self):
@@ -90,8 +92,11 @@ class ServerData:
         return list(self.__logs)
     
     def clearLogs(self):
-        """Pulisce tutti i log"""
+        """Pulisce tutti i log e aggiorna il timestamp di clear"""
+        self.logs_lock.acquire()
         self.__logs.clear()
+        self.__last_clear_timestamp = time.time()
+        self.logs_lock.release()
 
 def threaded(func):
     def wrapper(*args, **kwargs):
@@ -202,7 +207,7 @@ def index():
     return """
     <html>
     <head>
-        <title>Carla Simulator</title>
+        <title>Carla Simulator </title>
         <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
         <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.5.1/jquery.min.js"></script>
         <style>
@@ -212,6 +217,8 @@ def index():
                 background-color: #f4f4f4;
                 margin: 0;
                 padding: 20px;
+                padding-top: 0;
+                padding-bottom: 0;
                 min-height: 100vh;
                 display: flex;
                 flex-direction: column;
@@ -267,7 +274,8 @@ def index():
                 border-radius: 8px;
                 box-shadow: 0 0 8px rgba(0,0,0,0.05);
                 border: 1px solid #e1e1e1;
-                padding: 15px;
+                padding-top: 10px;
+                padding-bottom: 10px;
                 display: flex;
                 justify-content: space-between;
             }
@@ -448,11 +456,13 @@ def index():
             }
             
             #speedometer {
-                font-size: 48px; 
+                margin-top: -150px;
+                font-size: 15px; 
                 font-weight: bold; 
                 color: #007BFF; 
                 text-align: center;
             }
+
         </style>
     </head>
     <body>
@@ -505,7 +515,6 @@ def index():
                 </div>
             </div>
         </div>
-        <footer>Gruppo 02</footer>
 
         <script>
             let targetData = [], currentData = [], labels = [];
@@ -577,6 +586,9 @@ def index():
                 });
             }
             
+            // Variabile per memorizzare l'ultimo timeout
+            let logsTimeout;
+
             function getLogs() {
                 $.ajax({
                     type: 'POST', url: '/logs', dataType: 'json',
@@ -585,7 +597,6 @@ def index():
                             const logsContainer = document.querySelector('#logs-container .logs-content');
                             logsContainer.innerHTML = '';
                             
-                            // Visualizzazione dei log più recenti all'inizio
                             for (let i = logs.length - 1; i >= 0; i--) {
                                 const log = logs[i];
                                 const logEntry = document.createElement('div');
@@ -595,7 +606,9 @@ def index():
                             }
                         }
                     },
-                    complete: function() { setTimeout(getLogs, 1000); }
+                    complete: function() { 
+                        logsTimeout = setTimeout(getLogs, 1000); 
+                    }
                 });
             }
             
@@ -606,6 +619,9 @@ def index():
                     success: function() {
                         const logsContainer = document.querySelector('#logs-container .logs-content');
                         logsContainer.innerHTML = '<div class="log-entry">Logs cleared</div>';
+                        // Aggiungi un piccolo ritardo al prossimo polling per evitare race condition
+                        clearTimeout(logsTimeout);
+                        logsTimeout = setTimeout(getLogs, 2000);
                     }
                 });
             }

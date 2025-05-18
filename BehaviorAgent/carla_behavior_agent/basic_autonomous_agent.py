@@ -47,7 +47,7 @@ class MyTeamAgent(AutonomousAgent):
         
         if self.__show:
             self.showServer = Streamer(self.configs["Visualizer_IP"])
-
+        
     def sensors(self):
         """
         Define the sensor suite required by the agent
