@@ -53,6 +53,7 @@ class BehaviorAgent(BasicAgent):
         self._min_speed = 5
         self._behavior = None
         self._sampling_resolution = 4.5
+        self._blocked = False
 
         # Parameters for agent behavior
         if behavior == 'cautious':
@@ -299,30 +300,102 @@ class BehaviorAgent(BasicAgent):
             print(msg)
             self.logger.debug(msg)
 
+            # Emergency brake if the car is very close.
+            if distance < self._behavior.braking_distance and not self._blocked:
+                msg= f"[INFO - Vehicle Avoidance] Emergency stop due to vehicle proximity"
+                print(msg)
+                self.logger.critical(msg)
+                self._blocked = True
+                return self.emergency_stop()
+
             if is_abandoned:
-                # If the vehicle is considered parked/abandoned, we can overtake it
-                msg = f"[DEBUG - Vehicle Avoidance] Vehicle {vehicle} is parked/abandoned, overtaking."
+                # If the vehicle is considered parked/abandoned, we can try to overtake it.
+                msg = f"[DEBUG - Vehicle Avoidance] Vehicle {vehicle} is parked/abandoned, attempting to overtake."
                 print(msg)
                 self.logger.debug(msg)
-                overtake_path = self._overtake.run_step(
-                    object_to_overtake=vehicle, ego_vehicle_wp=ego_vehicle_wp, distance_same_lane=1, distance_from_object=distance, speed_limit = self._speed_limit
-                )
-                if overtake_path:
-                    self.__update_global_plan(overtake_path=overtake_path)
-                if not self._overtake.in_overtake:
-                    return self.emergency_stop()
+                
+                overtake_path_generated_this_step = False
+                if not self._overtake.in_overtake: # Only attempt to start a new overtake if not already in one
+                    # Calculate a dynamic distance_same_lane, e.g., 1 second of travel at current speed, min 5m.
+                    # Convert current speed from m/s to km/h for self._speed, then back to m/s for distance.
+                    # get_speed returns m/s.
+                    safe_approach_distance = max(5.0, get_speed(self._vehicle) * 1.0) 
 
-            # Emergency brake if the car is very close.
-            if distance < self._behavior.braking_distance:
-                return self.emergency_stop()
-            else:
-                control = self.car_following_manager(vehicle, distance)
+                    overtake_path = self._overtake.run_step(
+                        object_to_overtake=vehicle, 
+                        ego_vehicle_wp=ego_vehicle_wp, 
+                        distance_same_lane=safe_approach_distance,
+                        distance_from_object=distance, 
+                        speed_limit=self._vehicle.get_speed_limit() # Use current actual speed limit from vehicle
+                    )
+                    if overtake_path:
+                        msg = f"[INFO - Vehicle Avoidance] Overtake path found. Initiating overtake."
+                        print(msg)
+                        self.logger.info(msg)
+                        self.__update_global_plan(overtake_path=overtake_path)
+                        # self._overtake.in_overtake and self._overtake.overtake_cnt are set by self._overtake.run_step()
+                        overtake_path_generated_this_step = True
+                    else:
+                        # Failed to find an overtake path, stop.
+                        msg = "[WARNING - Vehicle Avoidance] Failed to find an overtake path. Stopping."
+                        print(msg)
+                        self.logger.warning(msg)
+                        return self.emergency_stop()
+                
+                # If now in an overtake maneuver (either newly initiated or ongoing)
+                if self._overtake.in_overtake:
+                    # Set a higher speed for overtaking.
+                    # The _update_information method (called at the start of run_step)
+                    # is responsible for checking oncoming traffic and aborting if necessary by changing the global plan.
+                    
+                    current_actual_speed_limit = self._vehicle.get_speed_limit()
+                    # Define a desired margin, e.g., 10 km/h over the speed limit for overtaking.
+                    # This could be a parameter in self._behavior.
+                    overtake_speed_margin_kmh = getattr(self._behavior, 'overtake_speed_margin_kmh', 10.0) 
+                    
+                    desired_overtake_speed = current_actual_speed_limit + overtake_speed_margin_kmh
+                    
+                    # Ensure target speed is at least the current speed limit (if not already exceeding it)
+                    # and not more than max_speed.
+                    target_speed = min(self._behavior.max_speed, desired_overtake_speed)
+                    target_speed = max(target_speed, current_actual_speed_limit) # Ensure at least speed limit
+
+                    current_speed_kmh = get_speed(self._vehicle) * 3.6
+                    # If just starting the overtake and current speed is well below the desired overtake speed,
+                    # ensure the target_speed encourages acceleration.
+                    # If already moving fast, maintain speed or adjust to target_speed.
+                    if overtake_path_generated_this_step and current_speed_kmh < target_speed:
+                        pass # target_speed is already set to encourage acceleration
+                    elif current_speed_kmh > target_speed and self._overtake.in_overtake : # if already faster than calculated target during overtake
+                         target_speed = min(self._behavior.max_speed, current_speed_kmh) # maintain current speed if safe, capped by max_speed
+
+                    self._local_planner.set_speed(target_speed)
+                    msg = f"[INFO - Overtake] Active overtake. Target speed: {target_speed:.2f} km/h. Current speed: {current_speed_kmh:.2f} km/h. Limit: {current_actual_speed_limit:.2f} km/h."
+                    print(msg)
+                    self.logger.info(msg)
+                # else:
+                    # If not self._overtake.in_overtake here, it implies the overtake either:
+                    # 1. Failed to start (emergency_stop was called).
+                    # 2. Finished in a previous step (normal speed logic will apply).
+                    # No specific speed setting here if not actively overtaking.
+
+                control = self._local_planner.run_step(debug=debug) # This will use the speed set above if overtaking
+            
+            else: # Vehicle is not abandoned
+                # If the vehicle is not parked, we can follow it
+                msg = f"[DEBUG - Vehicle Avoidance] Vehicle {vehicle} is not parked, following."
+                print(msg)
+                self.logger.debug(msg)
+                control = self.car_following_manager(vehicle, distance, debug=debug)
 
         # 3: Intersection behavior
         elif self._incoming_waypoint.is_junction and (self._incoming_direction in [RoadOption.LEFT, RoadOption.RIGHT]):
             target_speed = min([
                 self._behavior.max_speed,
                 self._speed_limit - 5])
+            msg = f"[DEBUG - Intersection Behavior] Target speed set to:{target_speed}"
+            print(msg)
+            self.logger.debug(msg)
             self._local_planner.set_speed(target_speed)
             control = self._local_planner.run_step(debug=debug)
 
@@ -333,7 +406,7 @@ class BehaviorAgent(BasicAgent):
                 self._speed_limit - self._behavior.speed_lim_dist])
             self._local_planner.set_speed(target_speed)
             control = self._local_planner.run_step(debug=debug)
-
+            self._blocked = False
         return control
 
     def _update_information(self):
