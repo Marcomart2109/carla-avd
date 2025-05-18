@@ -69,6 +69,8 @@ class BehaviorAgent(BasicAgent):
         
         # Aggiungi una variabile per tenere traccia dello stato dell'offset laterale
         self._lateral_offset_active = False
+        self._original_max_throttle = None  # To store the original max_throttle
+        self._overtake_throttle_modified = False  # Flag to indicate if throttle was changed during overtake
 
         self.logger = logging.getLogger('behavior_agent')
         self.logger.setLevel(logging.DEBUG)
@@ -96,6 +98,20 @@ class BehaviorAgent(BasicAgent):
             :param debug: boolean for debugging
             :return control: carla.VehicleControl
         """
+
+        # --- Restoration logic for max_throttle ---
+        # Check if an overtake was active and throttle modified, but overtake is now finished.
+        if not self._overtake.in_overtake and self._overtake_throttle_modified:
+            if self._original_max_throttle is not None:
+                self._local_planner._vehicle_controller.max_throt = self._original_max_throttle
+                self.logger.info(f"Overtake finished: Max throttle restored to {self._local_planner._vehicle_controller.max_throt:.2f}.")
+                print(f"--- Overtake finished: Max throttle restored to {self._local_planner._vehicle_controller.max_throt:.2f}.")
+            else:
+                # Fallback: if original was somehow not stored, log a warning.
+                # Consider setting to a default if necessary, e.g., self._local_planner._vehicle_controller.max_throt = 0.75 (controller's default)
+                self.logger.warning("Overtake finished: _original_max_throttle was None. Throttle may not be correctly restored.")
+            self._overtake_throttle_modified = False
+            self._original_max_throttle = None # Clear stored value
 
         # Update the information regarding the ego vehicle
         self._update_information()
@@ -262,7 +278,7 @@ class BehaviorAgent(BasicAgent):
                     print(f"--- Bicycle detected in a different lane (Ego: {ego_lane_id}, Bicycle: {bicycle_lane_id}), aligned. No offset applied.")
                     if self._lateral_offset_active:
                         self.logger.info("Resetting previously active lateral offset as current bicycle is in a different lane.")
-                        print("--- Resetting previously active lateral offset.")
+                        print("--- Resetting previamente active lateral offset.")
                         self._local_planner.set_lateral_offset(0.0)
                         self._lateral_offset_active = False
             
@@ -426,7 +442,15 @@ class BehaviorAgent(BasicAgent):
                         effective_max_speed = temp_normal_behavior.max_speed # Use Normal's max_speed
                         self.logger.info("Overtake: Current behavior is Cautious. Using Normal's speed parameters for overtake.")
                         print("--- Overtake: Current behavior is Cautious. Using Normal's speed parameters for overtake.")
-                    
+
+                        # ---- Modify max_throttle if Cautious during overtake ----
+                        if not self._overtake_throttle_modified:
+                            self._original_max_throttle = self._local_planner._vehicle_controller.max_throt
+                            self._local_planner._vehicle_controller.max_throt = 1.0
+                            self._overtake_throttle_modified = True
+                            self.logger.info("Overtake (Cautious): Max throttle temporarily set to 1.0 for faster acceleration.")
+                            print("--- Overtake (Cautious): Max throttle temporarily set to 1.0 for faster acceleration.")
+                                
                     desired_overtake_speed = current_actual_speed_limit + overtake_speed_margin_kmh
                     
                     # Ensure target speed is at least the current speed limit (if not already exceeding it)
