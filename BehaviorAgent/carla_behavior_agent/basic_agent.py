@@ -515,15 +515,15 @@ class BasicAgent(object):
         return (False, None, -1)
     
     def _generate_lane_change_path(self, 
-                                   waypoint: carla.Waypoint, 
-                                   direction: str = 'left',
-                                   distance_same_lane: str = 10,
-                                   distance_other_lane: int = 25, 
-                                   lane_change_distance: int = 25,
-                                   check: bool = True, 
-                                   lane_changes: int = 1, 
-                                   step_distance: float = 4.5,
-                                   concorde: bool = False):  
+                                   waypoint, 
+                                   direction = 'left',
+                                   distance_same_lane = 10.0,
+                                   distance_other_lane = 25.0, 
+                                   lane_change_distance = 25.0,
+                                   check= True, 
+                                   lane_changes= 1, 
+                                   step_distance= 4.5,
+                                   concorde= False):  
         """
         This methods generates a path that results in a lane change. Use the different distances to fine-tune the maneuver.
         If the lane change is impossible, the returned path will be empty.
@@ -716,7 +716,7 @@ class BasicAgent(object):
         return vehicle_wp, False  # It's stopped for a legitimate traffic reason or moving
     
 
-    def _affected_by_sign(self, vehicle : carla.Vehicle, sign_type : str = "206", max_distance : float = None):
+    def _affected_by_sign(self, vehicle , sign_type= "206", max_distance = None):
         '''
         This method checks if the vehicle is affected by a stop sign of a specific type.
         Default type is "206", which is the type of the stop sign.

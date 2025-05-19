@@ -167,7 +167,7 @@ class LocalPlanner(object):
         :return:
         """
         # check we do not overflow the queue
-        available_entries = self._waypoints_queue.maxlen - len(self._waypoints_queue)
+        available_entries = self._waypoints_queue.maxlen - len(self._waypoints_queue)  # type: ignore
         k = min(available_entries, k)
 
         for _ in range(k):
@@ -206,7 +206,7 @@ class LocalPlanner(object):
 
         # Remake the waypoints queue if the new plan has a higher length than the queue
         new_plan_length = len(current_plan) + len(self._waypoints_queue)
-        if new_plan_length > self._waypoints_queue.maxlen:
+        if new_plan_length > self._waypoints_queue.maxlen: # type: ignore
             new_waypoint_queue = deque(maxlen=new_plan_length)
             for wp in self._waypoints_queue:
                 new_waypoint_queue.append(wp)

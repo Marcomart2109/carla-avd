@@ -1,11 +1,9 @@
-import socket
-import numpy as np
 import requests
 import threading 
 import time
 import base64
-import matplotlib
 from matplotlib import pyplot as plt
+from log_manager import LogManager 
 
 def threaded(func):
     def wrapper(*k, **kw):
@@ -45,7 +43,7 @@ class Streamer():
         self.verbose = False
 
         # Inizializza il LogManager
-        self.log_manager = LogManager(min_interval=1.0)
+        self.log_manager = LogManager()
 
         self.data = {
                 "url": "http://"+IP+":9803/new_frame",
@@ -178,11 +176,11 @@ class Streamer():
         self.data[datatype]["update"] = True
         self.data[datatype]["frame_lock"].release()
 
-    def add_log(self, category, message, level="INFO"):
+    def add_log(self, category, message, level="INFO", object_id=None, properties=None):
         """
         Aggiunge un log al LogManager e lo prepara per l'invio.
         """
-        if self.log_manager.add_log(category, message, level):
+        if self.log_manager.add_log(category, message, level, object_id, properties):
             # Ottiene tutti i log e li prepara per l'invio
             logs = self.log_manager.get_logs()
             self.send_data("Logs", {"logs": logs})
@@ -191,81 +189,3 @@ class Streamer():
         """Resetta i log e invia l'aggiornamento al server"""
         self.log_manager.reset()
         self.send_data("Logs", {"logs": []})
-
-class LogManager:
-    """
-    Gestisce i messaggi di log con throttling temporale per evitare duplicati ravvicinati.
-    """
-    def __init__(self, min_interval=1.0):
-        """
-        Inizializza il LogManager.
-        
-        :param min_interval: Intervallo minimo in secondi tra due eventi dello stesso tipo
-        """
-        # Dizionario che memorizza {categoria_evento: {messaggio: ultimo_timestamp}}
-        self.last_events = {}
-        # Intervallo minimo tra due eventi identici (in secondi)
-        self.min_interval = min_interval
-        # Coda dei messaggi da inviare
-        self.message_queue = []
-        # Lock per gestire l'accesso concorrente
-        self.lock = threading.Lock()
-    
-    def add_log(self, category, message, level="INFO"):
-        """
-        Aggiunge un log se non è un duplicato recente.
-        """
-        with self.lock:
-            current_time = time.time()
-            
-            # Inizializza il dizionario per questa categoria se non esiste
-            if category not in self.last_events:
-                self.last_events[category] = {}
-            
-            # Verifica se il messaggio è già stato inviato recentemente
-            if (message not in self.last_events[category] or 
-                current_time - self.last_events[category][message] > self.min_interval):
-                
-                # Aggiungi il messaggio alla coda
-                self.message_queue.append({
-                    "category": category,
-                    "message": message,
-                    "level": level,
-                    "timestamp": current_time
-                })
-                # Aggiorna il timestamp dell'ultimo evento
-                self.last_events[category][message] = current_time
-                
-                # Limita la dimensione della coda (opzionale)
-                if len(self.message_queue) > 100:
-                    self.message_queue.pop(0)
-                
-                return True
-            return False
-    
-    def get_logs(self):
-        """
-        Restituisce tutti i messaggi in coda e li mantiene.
-        """
-        with self.lock:
-            return self.message_queue.copy()
-    
-    def clear_old_logs(self, max_age=30.0):
-        """
-        Rimuove i log più vecchi di max_age secondi.
-        """
-        with self.lock:
-            current_time = time.time()
-            self.message_queue = [log for log in self.message_queue 
-                                if current_time - log["timestamp"] < max_age]
-
-    def reset(self):
-        """Resetta il log manager, pulendo tutti i log e gli eventi registrati"""
-        with self.lock:
-            self.last_events = {}
-            self.message_queue = []
-
-
-if __name__ == "__main__":
-    speed_plot = Plot("./userCode/speed.txt", "./userCode/speedplot.png")
-    speed_plot.plot()

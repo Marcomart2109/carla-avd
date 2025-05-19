@@ -56,13 +56,13 @@ class Overtake(BasicAgent):
     
     def run_step(
         self, 
-        object_to_overtake: carla.Actor, 
-        ego_vehicle_wp: carla.Waypoint,
-        distance_same_lane: float = 1,
-        distance_other_lane: float = 0,
-        distance_from_object: float = 18,
-        speed_limit: float = 50
-    ) -> None:
+        object_to_overtake, 
+        ego_vehicle_wp,
+        distance_same_lane = 1.0,
+        distance_other_lane = 0.0,
+        distance_from_object = 18.0,
+        speed_limit = 50
+    ):
         """Function that collects the logic and behavior to be adopted for the overtaking maneuver
 
             :param object_to_overtake: the vehicle to overtake (carla.Actor)
@@ -269,12 +269,12 @@ class Overtake(BasicAgent):
     #######################################################################   
     @staticmethod
     def get_overtake_distance(
-        vehicle_length : float, 
-        lane_width : float, 
-        distance_same_lane : float, 
-        distance_other_lane : float,
-        distance_from_obstacle : float
-    ) -> float:
+        vehicle_length , 
+        lane_width, 
+        distance_same_lane, 
+        distance_other_lane,
+        distance_from_obstacle
+    ):
         """ 
         This function calculates the distance that the ego vehicle needs to travel to overtake the vehicle in front of it.
         In particular, the distance is calculated using the Pythagorean theorem to approximate the distance that the ego vehicle needs 

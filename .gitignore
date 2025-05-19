@@ -11,3 +11,5 @@ results/
 gruppo/
 
 **/carla_behavior_agent/logs/**  
+
+**/carla_env/

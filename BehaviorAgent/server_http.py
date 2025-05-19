@@ -163,6 +163,9 @@ def new_frame():
     global appData
     data = request.json
 
+    if data is None or "type" not in data:
+        return jsonify(success=False, error="No data or missing 'type' field"), 400
+
     if data["type"] == "RGB":
         dataType = np.dtype(data["data"]["dtype"])
         dataArray = np.frombuffer(base64.b64decode(data["data"]["encode"].encode('utf-8')), dataType)
@@ -195,12 +198,9 @@ def new_frame():
 
 @app.route('/clear_logs', methods=['POST'])
 def clear_logs():
-    """Pulisce i log correnti"""
-    global appData
-    appData.logs_lock.acquire()
-    appData.clearLogs()
-    appData.logs_lock.release()
-    return jsonify({"success": True})
+    appData.clearLogs()  # <--- CORRETTO
+    return jsonify({"status": "cleared", "timestamp": time.time()})
+
 
 @app.route('/')
 def index():
@@ -392,11 +392,11 @@ def index():
                 border-left-color: #721c24;
             }
             
-            .log-CRITICAL { 
-                background-color: #f8d7da; 
-                color: #721c24; 
-                font-weight: bold; 
-                border-left-color: #a50000;
+            
+            .log-ACTION { 
+                background-color: #ffe8d6; 
+                color: #a05500; 
+                border-left-color: #ff8c00;
             }
             
             .log-legend {
@@ -497,6 +497,10 @@ def index():
                             <span>Debug</span>
                         </div>
                         <div class="legend-item">
+                            <div class="legend-color" style="background-color: #ffe8d6; border: 1px solid #a05500;"></div>
+                            <span>Action</span>
+                        </div>
+                        <div class="legend-item">
                             <div class="legend-color" style="background-color: #fff3cd; border: 1px solid #856404;"></div>
                             <span>Warning</span>
                         </div>
@@ -504,10 +508,7 @@ def index():
                             <div class="legend-color" style="background-color: #f8d7da; border: 1px solid #721c24;"></div>
                             <span>Error</span>
                         </div>
-                        <div class="legend-item">
-                            <div class="legend-color" style="background-color: #f8d7da; border: 1px solid #a50000; font-weight: bold;"></div>
-                            <span>Critical</span>
-                        </div>
+                        
                     </div>
                     <div class="logs-content">
                         <div class="log-entry">Waiting for logs...</div>
@@ -595,14 +596,28 @@ def index():
                     success: function(logs) {
                         if (logs && logs.length > 0) {
                             const logsContainer = document.querySelector('#logs-container .logs-content');
+                            
+                            // Svuota il contenitore solo se ci sono nuovi log
                             logsContainer.innerHTML = '';
+                            
+                            // Mantieni un set di ID log già visualizzati
+                            const loggedIds = new Set();
                             
                             for (let i = logs.length - 1; i >= 0; i--) {
                                 const log = logs[i];
-                                const logEntry = document.createElement('div');
-                                logEntry.className = `log-entry log-${log.level}`;
-                                logEntry.innerHTML = `<strong>${log.formatted_time} [${log.category}]</strong>: ${log.message}`;
-                                logsContainer.appendChild(logEntry);
+                                
+                                // Verifica se il log ha già un ID univoco, altrimenti ne crea uno
+                                const logId = log.log_id || `${log.timestamp}-${log.category}`;
+                                
+                                // Controlla se questo log è già stato visualizzato
+                                if (!loggedIds.has(logId)) {
+                                    loggedIds.add(logId);
+                                    
+                                    const logEntry = document.createElement('div');
+                                    logEntry.className = `log-entry log-${log.level}`;
+                                    logEntry.innerHTML = `<strong>${log.formatted_time} [${log.category}]</strong>: ${log.message}`;
+                                    logsContainer.appendChild(logEntry);
+                                }
                             }
                         }
                     },
@@ -619,7 +634,8 @@ def index():
                     success: function() {
                         const logsContainer = document.querySelector('#logs-container .logs-content');
                         logsContainer.innerHTML = '<div class="log-entry">Logs cleared</div>';
-                        // Aggiungi un piccolo ritardo al prossimo polling per evitare race condition
+                        
+                        // Cancella il timeout corrente e crea un ritardo più lungo prima di richiedere nuovi log
                         clearTimeout(logsTimeout);
                         logsTimeout = setTimeout(getLogs, 2000);
                     }
@@ -634,4 +650,4 @@ def index():
     """
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=9803, debug=True)
+    app.run(host='0.0.0.0', port=9803, debug=False)

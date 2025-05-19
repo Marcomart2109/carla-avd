@@ -8,8 +8,6 @@
 waypoints and avoiding other vehicles. The agent also responds to traffic lights,
 traffic signs, and has different possible configurations. """
 
-import random
-import math
 import numpy as np
 import carla
 from basic_agent import BasicAgent
@@ -19,6 +17,8 @@ from overtake import Overtake
 from misc import *
 import logging
 import time
+from log_manager import ACTION, DedupFilter
+import os 
 
 class BehaviorAgent(BasicAgent):
     """
@@ -53,7 +53,6 @@ class BehaviorAgent(BasicAgent):
         self._incoming_waypoint = None
         self._min_speed = 5
         self._behavior = None
-        self._sampling_resolution = 4.5
         self._blocked = False
 
         # Parameters for agent behavior
@@ -68,17 +67,14 @@ class BehaviorAgent(BasicAgent):
 
         self._overtake = Overtake(self._vehicle, opt_dict)
         
-        # Aggiungi una variabile per tenere traccia dello stato dell'offset laterale
+        # Added a variable to track the state of the lateral offset
         self._lateral_offset_active = False
         self._original_max_throttle = None  # To store the original max_throttle
         self._overtake_throttle_modified = False  # Flag to indicate if throttle was changed during overtake
 
-        # Configurazione standard del logger
+        # Logger Configuration
         self.logger = logging.getLogger('behavior_agent')
         self.logger.setLevel(logging.DEBUG)
-
-        # Assicurati che la directory dei log esista
-        import os
         log_dir = './carla_behavior_agent/logs/'
         os.makedirs(log_dir, exist_ok=True)
 
@@ -95,31 +91,31 @@ class BehaviorAgent(BasicAgent):
         # Create a formatter and set it for the handler
         self.formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
         file_handler.setFormatter(self.formatter)
+        file_handler.addFilter(DedupFilter(interval=10.0))
         
         # Add the handler to the logger 
         self.logger.addHandler(file_handler)
         
-        # Imposta propagate a False per evitare log duplicati
+        # set propage to false to avoid double logging
         self.logger.propagate = False
-
-        self.logger.info(f"Behavior agent initialized with behavior: {behavior}")
     
-        # Riferimento allo streamer (da impostare esternamente)
+        # Streamer Refer
         self._streamer = None
         
-        # Aggiungi un log di test (verrà inviato quando viene impostato lo streamer)
+        # Test Log
         self._test_log_sent = False
 
-        # Tracciamento oggetti per evitare log duplicati
+        # Track the objects that have been logged to avoid duplicates
         self._logged_objects = {
             "pedestrian": {},
             "bicycle": {},
             "vehicle": {},
             "obstacle": {},
             "traffic_light": False,
-            "stop_sign": {}
+            "stop_sign": {},
+            "overtake": {}
         }
-        self._log_timeout = 5.0  # Secondi prima di poter loggare nuovamente lo stesso oggetto
+        
 
     ################################
     ########### RUN STEP ###########
@@ -138,12 +134,14 @@ class BehaviorAgent(BasicAgent):
         if not self._overtake.in_overtake and self._overtake_throttle_modified:
             if self._original_max_throttle is not None:
                 self._local_planner._vehicle_controller.max_throt = self._original_max_throttle
-                self.logger.info(f"Overtake finished: Max throttle restored to {self._local_planner._vehicle_controller.max_throt:.2f}.")
-                print(f"--- Overtake finished: Max throttle restored to {self._local_planner._vehicle_controller.max_throt:.2f}.")
+                msg = f"Overtake finished: Max throttle restored to {self._local_planner._vehicle_controller.max_throt:.2f}."
+                self.send_log_to_console(msg)
             else:
                 # Fallback: if original was somehow not stored, log a warning.
                 # Consider setting to a default if necessary, e.g., self._local_planner._vehicle_controller.max_throt = 0.75 (controller's default)
-                self.logger.warning("Overtake finished: _original_max_throttle was None. Throttle may not be correctly restored.")
+                msg = "Overtake finished: _original_max_throttle was None. Throttle may not be correctly restored."
+                self.send_log_to_console(msg,"WARNING")
+
             self._overtake_throttle_modified = False
             self._original_max_throttle = None # Clear stored value
 
@@ -151,8 +149,8 @@ class BehaviorAgent(BasicAgent):
         self._update_information()
 
         control = None
-        if self._behavior.tailgate_counter > 0:
-            self._behavior.tailgate_counter -= 1
+        if self._behavior.tailgate_counter > 0: 
+            self._behavior.tailgate_counter -= 1 
 
         # Get the current waypoint of the ego vehicle
         ego_vehicle_loc = self._vehicle.get_location()
@@ -168,6 +166,7 @@ class BehaviorAgent(BasicAgent):
         # and if it is red
         if self.traffic_light_manager():
             # TODO: Add a behaviour for more than one traffic light
+            self.send_log_to_web("TRAFFIC_LIGHT", "Red light detected", "ACTION")
             return self.emergency_stop()
 
 
@@ -182,21 +181,24 @@ class BehaviorAgent(BasicAgent):
             distance = max(0,w_distance - max(
                 walker.bounding_box.extent.y, walker.bounding_box.extent.x) - max(
                     self._vehicle.bounding_box.extent.y, self._vehicle.bounding_box.extent.x))
-            msg = f"[DEBUG - Pedestrian Avoidance] Pedestrian {walker} detected, distance 1: {distance}"
-            print(msg)
-            self.logger.critical(msg)
             
-            # Emergency brake if the car is very close.
-            if  distance < 6 * self._behavior.braking_distance:
+            # Debug message
+            msg = f"[DEBUG - Pedestrian Avoidance] Pedestrian {walker} detected, distance 1: {distance}"
+            self.send_log_to_console(msg)
+            
+            # Brake moment
+            if  distance < 8 * self._behavior.braking_distance:
                 target_speed = self._vehicle.get_velocity().length() / 2
                 self.set_target_speed(target_speed)
-                msg = f"[INFO - Walker Obstacle Avoidance] Target speed set to:{target_speed}\n[INFO] Distance to static obstacle: {distance}"
-                print(msg)
+                print(f"[INFO - Walker Obstacle Avoidance] Target speed set to:{target_speed}\n[INFO] Distance to static obstacle: {distance}")
+                
                 # Complete stop only if extremely close
                 if distance < 2 * self._behavior.braking_distance:
+                    # Debug message
                     msg = f"[WARNING - Walker Obstacle Avoidance] Emergency stop due to static obstacle proximity"
-                    print(msg)
-                    self.logger.critical(msg)
+                    self.send_log_to_console(msg, "WARNING")
+                    self.send_log_to_web("pedestrian", f"Emergency Stop for the Pedestrian: {walker.id}", "ACTION")
+
                     return self.emergency_stop()
 
 
@@ -205,49 +207,36 @@ class BehaviorAgent(BasicAgent):
         ########## Obstacle Avoidance Behaviors ##########
         ##################################################
         so_state, static_obstacle, so_distance = self.static_obstacle_avoid_manager(ego_vehicle_wp)
-        if so_state is True:
-            
-            extent_obstacle = max(static_obstacle.bounding_box.extent.y, static_obstacle.bounding_box.extent.x)
-            extent_vehicle = max(self._vehicle.bounding_box.extent.y, self._vehicle.bounding_box.extent.x)
-            msg = f"[Distance Information]so_distance: {so_distance}, extent_obstacle: {extent_obstacle}, extent_vehicle: {extent_vehicle}"
-            print(msg)
-            self.logger.info(msg)
-            distance = so_distance - extent_obstacle - extent_vehicle
-            msg = f"[Static Obstacle Avoidance] Static obstacle:{static_obstacle} detected, distance 1: {distance}"
-            print(msg)
-            self.logger.warning(msg)
-        
+        if so_state is True:        
             distance = compute_distance_from_center(actor1 =self._vehicle, actor2 = static_obstacle, distance=so_distance)
-            msg = f"[Static Obstacle Avoidance] Static obstacle:{static_obstacle} detected, distance 2: {distance}"
+
+            # Debug message
+            msg = f"[Static Obstacle Avoidance] Static obstacle:{static_obstacle} detected, distance: {distance}"
             print(msg)
             self.logger.critical(msg)
-
-
-            msg = f"Static obstacle detected, distance: {distance}"
-            print(f"[DEBUG - Static Obstacle Avoidance] {msg}")
 
             overtake_path = self._overtake.run_step(
                 object_to_overtake=static_obstacle, ego_vehicle_wp=ego_vehicle_wp, distance_same_lane=1, distance_other_lane=20, distance_from_object=so_distance, speed_limit = self._speed_limit
             )
 
-            if overtake_path:
-                print("[INFO - Static Obstacle Avoidance] Overtake path found")
+            # Check if the overtake path was generated and start the overtake
+            if overtake_path: 
+                self.send_log_to_web("overtake", "Overtake Path Found", "INFO")
                 self.__update_global_plan(overtake_path=overtake_path)
+                self.send_log_to_web("overtake", "Starting the overtake", "ACTION")
             
-            msg = f"[DEBUG - Static Obstacle Avoidance] in overtake: {self._overtake.in_overtake}, so_distance: {so_distance}"
-            print(msg)
-            self.logger.debug(msg)
 
-            if not self._overtake.in_overtake and distance < 2 * self._behavior.braking_distance:
-                self.set_target_speed(self._approach_speed)
-                msg = f"[INFO - Static Obstacle Avoidance] Target speed set to:{self._approach_speed}\n[INFO] Distance to static obstacle: {distance}"
-                print(msg)
-                # Complete stop only if extremely close
-                if distance < self._behavior.braking_distance:
-                    msg = "[WARNING - Static Obstacle Avoidance] Emergency stop due to static obstacle proximity"
-                    print(msg)
-                    self.logger.critical(msg)
-                    return self.emergency_stop()
+            if not self._overtake.in_overtake and distance < 3 * self._behavior.braking_distance:
+                self.set_target_speed(self._approach_speed*2)
+
+                if distance < 2 * self._behavior.braking_distance:
+                    self.set_target_speed(self._approach_speed)
+
+                    if distance < self._behavior.braking_distance:
+                        msg = "[WARNING - Static Obstacle Avoidance] Emergency stop due to static obstacle proximity"
+                        self.send_log_to_console(msg, "WARNING")
+                        self.send_log_to_web("obstacle", "Emergency Stop for the Obstacle", "ACTION")
+                        return self.emergency_stop()
                 
                 return self._local_planner.run_step()
 
@@ -279,8 +268,8 @@ class BehaviorAgent(BasicAgent):
             if abs(diff_yaw) < is_aligned_threshold:                   
                 # Controlla se la bicicletta è nella STESSA corsia del veicolo ego
                 if ego_lane_id == bicycle_lane_id:
-                    self.logger.info(f"Bicycle {bicycle.id} detected in the SAME lane ({ego_lane_id}), aligned. Distance: {b_distance:.2f}m.")
-                    print(f"--- Bicycle {bicycle.id} detected in the same lane, aligned.")
+                    msg = "Bicycle {bicycle.id} detected in the SAME lane ({ego_lane_id}), aligned. Distance: {b_distance:.2f}m."
+                    self.send_log_to_console(msg)
                     # Controlla se la bicicletta è vicina al centro della corsia. In questo caso, l'agente sorpasserà la bicicletta.
                     if is_bicycle_near_center(vehicle_location=bicycle.get_location(), ego_vehicle_wp=ego_vehicle_wp) and get_speed(self._vehicle) < 0.1:
                         self.logger.info(f"Bicycle {bicycle.id} is near the center of our lane. Attempting to overtake.")
@@ -290,16 +279,22 @@ class BehaviorAgent(BasicAgent):
                             object_to_overtake=bicycle, ego_vehicle_wp=ego_vehicle_wp, distance_same_lane=1, distance_from_object=b_distance, speed_limit = self._speed_limit
                         )                                               
                         if overtake_path:
-                            self.logger.info(f"Overtake path found for bicycle {bicycle.id}.")
+                            msg = f"Overtake path found for bicycle {bicycle.id}. Initiating overtake."
+                            self.send_log_to_console(msg)
+                            self.send_log_to_web("overtake", f"Overtake path found for bicycle {bicycle.id}.", "INFO")
                             self.__update_global_plan(overtake_path=overtake_path)
+                            self.send_log_to_web("overtake", f"Starting the overtake of bicycle {bicycle.id}.", "ACTION")
+
                         if not self._overtake.in_overtake: 
-                             self.logger.warning(f"Overtake of bicycle {bicycle.id} not active. Emergency stop.")
-                             print(f"--- Overtake of bicycle {bicycle.id} not active. Emergency stop.")
-                             return self.emergency_stop()
+                            msg = f"Overtake path not found for bicycle {bicycle.id}. Emergency stop."
+                            self.send_log_to_web("overtake", msg, "ACTION")
+                            self.send_log_to_console(msg, "WARNING")
+                            return self.emergency_stop()
                     else: 
-                        self.logger.info(f"Bicycle {bicycle.id} is in our lane, but off-center. Applying lateral offset.")
-                        print("--- Bicycle is in our lane, not centered. Applying lateral offset to avoid it.")
+                        msg = f"Bicycle {bicycle.id} is in our lane, but not centered. Applying lateral offset."
+                        self.send_log_to_console(msg)
                         new_offset = -(2.5 * bicycle.bounding_box.extent.y + self._vehicle.bounding_box.extent.y)
+                        self.send_log_to_web("bicycle", f"Applying lateral offset of {new_offset:.2f}m to avoid bicycle {bicycle.id}", "ACTION")
                         self._local_planner.set_lateral_offset(new_offset)
                         self._lateral_offset_active = True
                         target_speed = min([
@@ -308,18 +303,19 @@ class BehaviorAgent(BasicAgent):
                         self._local_planner.set_speed(target_speed)
                         control = self._local_planner.run_step(debug=debug)
                 else: # La bicicletta è allineata (stessa direzione) ma in una corsia DIVERSA
-                    self.logger.info(f"Bicycle {bicycle.id} detected in a different lane (Ego: {ego_lane_id}, Bicycle: {bicycle_lane_id}), aligned. No offset applied.")
-                    print(f"--- Bicycle detected in a different lane (Ego: {ego_lane_id}, Bicycle: {bicycle_lane_id}), aligned. No offset applied.")
+                    msg = f"Bicycle {bicycle.id} detected in a different lane (Ego: {ego_lane_id}, Bicycle: {bicycle_lane_id}), aligned. No offset applied."
+                    self.send_log_to_console(msg)
                     if self._lateral_offset_active:
-                        self.logger.info("Resetting previously active lateral offset as current bicycle is in a different lane.")
-                        print("--- Resetting previamente active lateral offset.")
+                        msg = "Resetting previously active lateral offset as current bicycle is in a different lane."
+                        self.send_log_to_console(msg)
+                        self.send_log_to_web("bicycle", msg, "ACTION")
                         self._local_planner.set_lateral_offset(0.0)
                         self._lateral_offset_active = False
             
             # CASO: Bicicletta NON allineata (potenzialmente attraversante o in direzione opposta)
             else:
-                self.logger.info(f"Bicycle {bicycle.id} is NOT ALIGNED (yaw_diff: {diff_yaw:.1f} deg). Distance: {b_distance:.2f}m. Speed: {get_speed(bicycle):.1f} km/h.")
-                print(f"--- Bicycle {bicycle.id} is NOT ALIGNED (yaw_diff: {diff_yaw:.1f} deg). Distance: {b_distance:.2f}m.")
+                msg = f"Bicycle {bicycle.id} detected in a different lane (Ego: {ego_lane_id}, Bicycle: {bicycle_lane_id}), NOT aligned. Distance: {b_distance:.2f}m."
+                self.send_log_to_console(msg)
 
                 # Verifica se la bicicletta sta effettivamente attraversando la nostra traiettoria
                 # Questo è un controllo semplificato. Una predizione di traiettoria sarebbe più robusta.
@@ -327,32 +323,33 @@ class BehaviorAgent(BasicAgent):
                 is_potentially_crossing = abs(diff_yaw) > is_aligned_threshold and abs(abs(diff_yaw) - 180) > is_aligned_threshold 
 
                 if is_potentially_crossing and b_distance < self._behavior.braking_distance * 3: # Distanza di sicurezza per reagire
-                    self.logger.warning(f"Bicycle {bicycle.id} is potentially CROSSING at {b_distance:.2f}m. Initiating emergency stop or significant slowdown.")
-                    print(f"--- Bicycle {bicycle.id} is potentially CROSSING at {b_distance:.2f}m. EMERGENCY STOP / SLOWDOWN.")
-                    
+                    msg = f"Bicycle {bicycle.id} is potentially CROSSING at {b_distance:.2f}m. Initiating emergency stop or significant slowdown."
+                    self.send_log_to_console(msg, "WARNING")
                     # Se molto vicina, arresto di emergenza completo
                     if b_distance < self._behavior.braking_distance * 1.5:
-                         self.logger.critical(f"Bicycle {bicycle.id} CRITICAL proximity while crossing. EMERGENCY STOP.")
-                         return self.emergency_stop()
+                        msg = f"Bicycle {bicycle.id} CRITICAL proximity while crossing. EMERGENCY STOP."
+                        self.send_log_to_console(msg, "CRITICAL")
+                        return self.emergency_stop()
                     else:
                         # Altrimenti, rallenta drasticamente per valutare meglio
                         target_speed = min(self._approach_speed / 2, get_speed(self._vehicle) / 2) # Rallenta significativamente
                         target_speed = max(target_speed, 0) # Non andare in retromarcia
                         self.set_target_speed(target_speed)
-                        self.logger.info(f"Slowing down significantly to {target_speed:.1f} km/h for crossing bicycle.")
+                        msg = f"Bicycle {bicycle.id} is crossing. Slowing down to {target_speed:.1f} km/h."
+                        self.send_log_to_console(msg)
                         control = self._local_planner.run_step(debug=debug)
 
                 elif get_speed(bicycle) < 1 and b_distance < self._behavior.braking_distance * 2: # Non allineata, lenta/ferma e vicina
-                    self.logger.info(f"Bicycle {bicycle.id} is not aligned, slow/stopped, and close. Decelerating to approach speed.")
-                    print("--- Bicycle is not aligned, slow/stopped, and close. Decelerating.")
+                    msg = f"Bicycle {bicycle.id} is NOT aligned, slow/stopped, and close. Decelerating to approach speed."
+                    self.send_log_to_console(msg)
                     self.set_target_speed(self._approach_speed)
                     control = self._local_planner.run_step(debug=debug)
                 
                 else: # Bicicletta non allineata, ma più lontana o in movimento in modo non immediatamente critico
                       # In questo caso, potrebbe essere una bicicletta sul lato opposto della strada che si allontana
                       # o una che ha già attraversato. Mantenere una velocità prudente.
-                    self.logger.info(f"Bicycle {bicycle.id} not aligned, but not an immediate crossing threat. Maintaining cautious speed.")
-                    print("--- Bicycle not aligned, but not an immediate crossing threat. Maintaining cautious speed.")
+                    msg = f"Bicycle {bicycle.id} is NOT aligned, but not an immediate crossing threat. Maintaining cautious speed."
+                    self._send_log_to_console(msg)
                     # Non fare nulla di specifico qui lascerebbe il controllo al comportamento di default successivo
                     # Oppure, si potrebbe impostare una velocità leggermente ridotta per precauzione
                     # target_speed = min(self._speed_limit - self._behavior.speed_lim_dist, self._behavior.max_speed)
@@ -362,8 +359,8 @@ class BehaviorAgent(BasicAgent):
                     # ma se 'control' non è ancora impostato, verrà gestito dal car_following o dal lane_following.
 
         elif self._lateral_offset_active: # Nessuna bicicletta rilevata, ma l'offset era attivo
-            self.logger.info("No bicycle detected. Resetting previously active lateral offset.")
-            print("--- No bicycle detected, resetting lateral offset to 0") # Messaggio originale
+            msg = f"Bicycle offset was active, but no bicycle detected. Resetting lateral offset."
+            self.send_log_to_console(msg)
             self._local_planner.set_lateral_offset(0.0)
             self._lateral_offset_active = False
                 
@@ -377,15 +374,14 @@ class BehaviorAgent(BasicAgent):
             # Distance is computed from the center of the car and the stop sign,
             # we use bounding boxes to calculate the actual distance
             distance = stop_sign_distance
-            msg = f"[DEBUG - Stop Sign Avoidance] Stop sign {stop_sign} detected, distance: {distance}"
-            print(msg)
-            self.logger.debug(msg)
+            msg = f" Stop sign {stop_sign} detected, distance: {distance}"
+            self.send_log_to_console(msg)
 
             # Slow down if the stop sign is getting closer
             if distance < 2 * self._behavior.braking_distance:
                 self.set_target_speed(self._approach_speed)
                 msg = f"[INFO - Stop Sign Avoidance] Target speed set to:{self._approach_speed}\n[INFO] Distance to stop sign: {distance}"
-                print(msg)
+                self.send_log_to_console(msg)
                 
                 # # Complete stop only if extremely close
                 # if distance < self._behavior.braking_distance:
@@ -412,22 +408,19 @@ class BehaviorAgent(BasicAgent):
             # Check if the car is legitimately stopped
             vehicle_wp, is_abandoned = self.is_vehicle_legitimately_stopped(vehicle)
             msg = f"[DEBUG - Vehicle Avoidance] Vehicle {vehicle} detected, distance: {distance}, is it abandoned? {is_abandoned}"
-            print(msg)
-            self.logger.debug(msg)
+            self.send_log_to_console(msg,"DEBUG")
 
             # Emergency brake if the car is very close.
             if distance < self._behavior.braking_distance and not self._blocked:
                 msg= f"[INFO - Vehicle Avoidance] Emergency stop due to vehicle proximity"
-                print(msg)
-                self.logger.critical(msg)
+                self.send_log_to_console(msg, "CRITICAL")
                 self._blocked = True
                 return self.emergency_stop()
 
             if is_abandoned:
                 # If the vehicle is considered parked/abandoned, we can try to overtake it.
                 msg = f"[DEBUG - Vehicle Avoidance] Vehicle {vehicle} is parked/abandoned, attempting to overtake."
-                print(msg)
-                self.logger.debug(msg)
+                self.send_log_to_console(msg, "DEBUG")
                 
                 overtake_path_generated_this_step = False
                 if not self._overtake.in_overtake: # Only attempt to start a new overtake if not already in one
@@ -445,16 +438,14 @@ class BehaviorAgent(BasicAgent):
                     )
                     if overtake_path:
                         msg = f"[INFO - Vehicle Avoidance] Overtake path found. Initiating overtake."
-                        print(msg)
-                        self.logger.info(msg)
+                        self.send_log_to_console(msg)
                         self.__update_global_plan(overtake_path=overtake_path)
                         # self._overtake.in_overtake and self._overtake.overtake_cnt are set by self._overtake.run_step()
                         overtake_path_generated_this_step = True
                     else:
                         # Failed to find an overtake path, stop.
                         msg = "[WARNING - Vehicle Avoidance] Failed to find an overtake path. Stopping."
-                        print(msg)
-                        self.logger.warning(msg)
+                        self.send_log_to_console(msg, "WARNING")
                         return self.emergency_stop()
                 
                 # If now in an overtake maneuver (either newly initiated or ongoing)
@@ -474,16 +465,16 @@ class BehaviorAgent(BasicAgent):
                         temp_normal_behavior = Normal()
                         overtake_speed_margin_kmh = getattr(temp_normal_behavior, 'overtake_speed_margin_kmh', 10.0) # Use Normal's margin
                         effective_max_speed = temp_normal_behavior.max_speed # Use Normal's max_speed
-                        self.logger.info("Overtake: Current behavior is Cautious. Using Normal's speed parameters for overtake.")
-                        print("--- Overtake: Current behavior is Cautious. Using Normal's speed parameters for overtake.")
+                        msg = f"Current behavior is Cautious. Using Normal's speed parameters for overtake."
+                        self.send_log_to_console(msg)
 
                         # ---- Modify max_throttle if Cautious during overtake ----
                         if not self._overtake_throttle_modified:
                             self._original_max_throttle = self._local_planner._vehicle_controller.max_throt
                             self._local_planner._vehicle_controller.max_throt = 1.0
                             self._overtake_throttle_modified = True
-                            self.logger.info("Overtake (Cautious): Max throttle temporarily set to 1.0 for faster acceleration.")
-                            print("--- Overtake (Cautious): Max throttle temporarily set to 1.0 for faster acceleration.")
+                            msg = f"Overtake (Cautious): Max throttle temporarily set to 1.0 for faster acceleration."
+                            self.send_log_to_console(msg)
                                 
                     desired_overtake_speed = current_actual_speed_limit + overtake_speed_margin_kmh
                     
@@ -503,8 +494,7 @@ class BehaviorAgent(BasicAgent):
 
                     self._local_planner.set_speed(target_speed)
                     msg = f"[INFO - Overtake] Active overtake. Target speed: {target_speed:.2f} km/h. Current speed: {current_speed_kmh:.2f} km/h. Limit: {current_actual_speed_limit:.2f} km/h."
-                    print(msg)
-                    self.logger.info(msg)
+                    self.send_log_to_console(msg)
                 # else:
                     # If not self._overtake.in_overtake here, it implies the overtake either:
                     # 1. Failed to start (emergency_stop was called).
@@ -577,14 +567,14 @@ class BehaviorAgent(BasicAgent):
 
         if affected:
             if self._should_log_object("traffic_light"):
-                self.send_log("TRAFFIC_LIGHT", "Red light detected", "WARNING")
+                self.send_log_to_web("TRAFFIC_LIGHT", "Red light detected", "WARNING")
         else:
             # Reset quando non siamo più influenzati dal semaforo
             self._logged_objects["traffic_light"] = False
             
         return affected
     
-    def stop_sign_manager(self, vehicle : carla.Vehicle, sign_distance : int = 20) -> bool:
+    def stop_sign_manager(self, vehicle : carla.Vehicle, sign_distance : int = 20):
         """
         This method is in charge of behaviors for stop signs.
         
@@ -592,6 +582,8 @@ class BehaviorAgent(BasicAgent):
             :param sign_distance (int): distance to the stop sign.
             
             :return affected (bool): True if the vehicle is affected by the stop sign, False otherwise.
+            :return signal: the stop sign actor if affected, else None.
+            :return distance: distance to the stop sign if affected, else -1.
         """
         affected, signal = self._affected_by_sign(vehicle=vehicle, sign_type="206", max_distance=sign_distance)
         distance = -1 if not affected else dist(a=vehicle, b=signal)
@@ -659,9 +651,15 @@ class BehaviorAgent(BasicAgent):
         bike_state = True
         distance = dist(bicycle_list[0], waypoint)
         
-        if self._should_log_object("bicycle", bicycle_list[0].id):
-            self.send_log("BICYCLE", "Bicycle detected", "WARNING")
-        
+        if bike_state:
+            properties = {
+                'is_moving': get_speed(bicycle_list[0]) > 0.1,
+                'relative_position': self._get_relative_position(bicycle_list[0])
+            }
+            
+            if self._should_log_object("bicycle", bicycle_list[0].id, properties):
+                self.send_log_to_web("BICYCLE", f"Bicycle detected (ID: {bicycle_list[0].id})", "Info")
+    
         return bike_state, bicycle_list[0], distance
 
     def collision_and_car_avoid_manager(self, waypoint):
@@ -703,8 +701,14 @@ class BehaviorAgent(BasicAgent):
                 self._tailgating(waypoint, vehicle_list)
 
         if vehicle_state:
-            if self._should_log_object("vehicle", vehicle.id):
-                self.send_log("VEHICLE", "Vehicle detected ahead", "INFO")
+            properties = {
+                'is_moving': get_speed(vehicle) > 0.1,
+                'relative_position': self._get_relative_position(vehicle),
+                'lane_id': self._map.get_waypoint(vehicle.get_location()).lane_id
+            }
+            
+            if self._should_log_object("vehicle", vehicle.id, properties):
+                self.send_log_to_web("VEHICLE", f"Vehicle detected (ID: {vehicle.id})", "INFO")
     
         return vehicle_state, vehicle, distance
 
@@ -737,8 +741,14 @@ class BehaviorAgent(BasicAgent):
                 self._behavior.min_proximity_threshold, self._speed_limit / 3), up_angle_th=60)
 
         if walker_state:
-            if self._should_log_object("pedestrian", walker.id):
-                self.send_log("PEDESTRIAN", "Pedestrian detected", "WARNING")
+            # Crea un dizionario con le proprietà rilevanti che determinano se è una nuova detection
+            properties = {
+                'is_moving': get_speed(walker) > 0.1,
+                'relative_position': 'front' if is_within_distance(walker.get_transform(), self._vehicle.get_transform(), 10, angle_interval=[0, 30]) else 'side'
+            }
+            
+            if self._should_log_object("pedestrian", walker.id, properties):
+                self.send_log_to_web("PEDESTRIAN", f"Pedestrian detected (ID: {walker.id})", "WARNING")
     
         return walker_state, walker, distance
 
@@ -827,7 +837,7 @@ class BehaviorAgent(BasicAgent):
 
         if o_state:
             if self._should_log_object("obstacle", o.id):
-                self.send_log("OBSTACLE", "Static obstacle detected", "INFO")
+                self.send_log_to_web("OBSTACLE", f"Static obstacle detected; {o}", "INFO")
     
         return o_state, o, o_distance
 
@@ -855,52 +865,96 @@ class BehaviorAgent(BasicAgent):
             
         # Invia un log di test per verificare il funzionamento
         if not self._test_log_sent:
-            self.send_log("SYSTEM", "BehaviorAgent initialized and connected to streamer", "INFO")
+            self.send_log_to_web("SYSTEM", "BehaviorAgent initialized and connected to streamer", "DEBUG")
             self._test_log_sent = True
+            
+    def send_log_to_web(self, category, message, level="INFO", object_id=None, properties=None):
+        """Invia un log allo streamer."""
+        # Logga con il logger standard
+        if level == "INFO":
+            self.logger.info(f"[{category}] {message}")
+        elif level == "WARNING":
+            self.logger.warning(f"[{category}] {message}")
+        elif level == "ERROR":
+            self.logger.error(f"[{category}] {message}")
+        elif level == "ACTION": 
+            self.logger.action(f"[{category}] {message}")
+        elif level == "DEBUG":
+            self.logger.debug(f"[{category}] {message}")
+    
+        # Invia il log allo streamer se disponibile
+        if self._streamer:
+            self._streamer.add_log(category, message, level, object_id, properties)
 
-    def send_log(self, category, message, level="INFO"):
+    def _should_log_object(self, category, object_id=None, properties=None):
         """
-        Invia un log sia al file di log che allo streamer (se disponibile)
+        Determina se un oggetto dovrebbe essere loggato, evitando duplicati per ID.
+    
+        Args:
+            category: Categoria dell'oggetto
+            object_id: ID dell'oggetto
+            properties: Proprietà dell'oggetto (ignorate per la deduplicazione)
+    
+        Returns:
+            bool: True se l'oggetto deve essere loggato, False altrimenti
         """
-        # Log al file normale
-        if level == "DEBUG":
-            self.logger.debug(message)
-        elif level == "INFO":
+        if object_id is None:
+            # Per oggetti senza ID (come semafori)
+            if not self._logged_objects[category]:
+                self._logged_objects[category] = True
+                return True
+            return False
+    
+        # Per oggetti con ID, controlliamo semplicemente se è già stato loggato
+        # Non consideriamo le proprietà: una volta loggato, non viene più loggato
+        if object_id not in self._logged_objects[category]:
+            # Prima volta che vediamo questo oggetto
+            self._logged_objects[category][object_id] = {
+                'timestamp': time.time(),
+                'properties': properties or {}
+            }
+            return True
+    
+        # L'oggetto è già stato loggato, non generiamo un nuovo log
+        return False
+
+    def _get_relative_position(self, actor):
+        """
+        Determina la posizione relativa di un attore rispetto al veicolo ego.
+        Restituisce: 'front', 'behind', 'left', 'right'
+        """
+        ego_transform = self._vehicle.get_transform()
+        actor_transform = actor.get_transform()
+        
+        # Calcola il vettore dall'ego all'attore
+        forward_vector = ego_transform.get_forward_vector()
+        right_vector = ego_transform.get_right_vector()
+        
+        # Calcola il vettore dall'ego all'attore nel sistema di coordinate dell'ego
+        to_actor = actor_transform.location - ego_transform.location
+        
+        # Proietta questo vettore sui vettori dell'ego
+        forward_proj = to_actor.x * forward_vector.x + to_actor.y * forward_vector.y
+        right_proj = to_actor.x * right_vector.x + to_actor.y * right_vector.y
+        
+        # Determina la posizione relativa
+        if abs(right_proj) < abs(forward_proj):
+            return 'front' if forward_proj > 0 else 'behind'
+        else:
+            return 'right' if right_proj > 0 else 'left'
+        
+    def send_log_to_console(self,message,level="INFO"):
+        """
+        Logga un messaggio sulla console.
+        """
+        print(f"{message}")
+        if level == "INFO":
             self.logger.info(message)
         elif level == "WARNING":
             self.logger.warning(message)
         elif level == "ERROR":
             self.logger.error(message)
-        elif level == "CRITICAL":
-            self.logger.critical(message)
-            
-        # Log allo streamer se disponibile
-        if self._streamer:
-            self._streamer.add_log(category, message, level)
-
-    def _should_log_object(self, category, object_id=None):
-        """
-        Determina se un oggetto dovrebbe essere loggato, evitando duplicati.
-        
-        Args:
-            category: Categoria dell'oggetto (pedestrian, bicycle, vehicle, obstacle, ecc.)
-            object_id: ID dell'oggetto, None per oggetti senza ID
-        
-        Returns:
-            bool: True se l'oggetto deve essere loggato, False altrimenti
-        """
-        current_time = time.time()
-        
-        # Per oggetti booleani (es. traffic light)
-        if object_id is None:
-            if not self._logged_objects[category]:
-                self._logged_objects[category] = True
-                return True
-            return False
-        
-        # Per oggetti con ID
-        if object_id not in self._logged_objects[category] or \
-           current_time - self._logged_objects[category][object_id] > self._log_timeout:
-            self._logged_objects[category][object_id] = current_time
-            return True
-        return False
+        elif level == "ACTION": 
+            self.logger.action(message)
+        elif level == "DEBUG":
+            self.logger.debug(message)

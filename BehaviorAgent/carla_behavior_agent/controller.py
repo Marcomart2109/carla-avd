@@ -209,22 +209,22 @@ class StanleyLateralController():
     def _get_lookahead_index(self, ego_loc, lookahead_distance):
         min_idx       = 0
         min_dist      = float("inf")
-        for i in range(len(self._wps)):
+        for i in range(len(self._wps)): # type: ignore
             dist = np.linalg.norm(np.array([
-                    self._wps[i][0].transform.location.x - ego_loc.x,
-                    self._wps[i][0].transform.location.y - ego_loc.y]))
+                    self._wps[i][0].transform.location.x - ego_loc.x, # type: ignore
+                    self._wps[i][0].transform.location.y - ego_loc.y])) # type: ignore
             if dist < min_dist:
                 min_dist = dist
                 min_idx = i
 
         total_dist = min_dist
         lookahead_idx = min_idx
-        for i in range(min_idx + 1, len(self._wps)):
+        for i in range(min_idx + 1, len(self._wps)): # type: ignore
             if total_dist >= lookahead_distance:
                 break
             total_dist += np.linalg.norm(np.array([
-                    self._wps[i][0].transform.location.x - self._wps[i-1][0].transform.location.x,
-                    self._wps[i][0].transform.location.y - self._wps[i-1][0].transform.location.y]))
+                    self._wps[i][0].transform.location.x - self._wps[i-1][0].transform.location.x, # type: ignore
+                    self._wps[i][0].transform.location.y - self._wps[i-1][0].transform.location.y])) # type: ignore
             lookahead_idx = i
         return lookahead_idx
     
@@ -244,16 +244,16 @@ class StanleyLateralController():
         
         # Get Target Waypoint
         ce_idx = self._get_lookahead_index(ego_loc,self._lookahead_distance)
-        desired_x = self._wps[ce_idx][0].transform.location.x
-        desired_y = self._wps[ce_idx][0].transform.location.y
+        desired_x = self._wps[ce_idx][0].transform.location.x # type: ignore
+        desired_y = self._wps[ce_idx][0].transform.location.y# type: ignore
         
         # Get Target Heading
-        if ce_idx < len(self._wps)-1:
-            desired_heading_x = self._wps[ce_idx+1][0].transform.location.x - self._wps[ce_idx][0].transform.location.x
-            desired_heading_y = self._wps[ce_idx+1][0].transform.location.y - self._wps[ce_idx][0].transform.location.y
+        if ce_idx < len(self._wps)-1: # type: ignore
+            desired_heading_x = self._wps[ce_idx+1][0].transform.location.x - self._wps[ce_idx][0].transform.location.x # type: ignore
+            desired_heading_y = self._wps[ce_idx+1][0].transform.location.y - self._wps[ce_idx][0].transform.location.y # type: ignore
         else:
-            desired_heading_x = self._wps[ce_idx][0].transform.location.x - self._wps[ce_idx-1][0].transform.location.x
-            desired_heading_y = self._wps[ce_idx][0].transform.location.y - self._wps[ce_idx-1][0].transform.location.y
+            desired_heading_x = self._wps[ce_idx][0].transform.location.x - self._wps[ce_idx-1][0].transform.location.x # type: ignore
+            desired_heading_y = self._wps[ce_idx][0].transform.location.y - self._wps[ce_idx-1][0].transform.location.y # type: ignore
         
         # Trajectory Heading
         desired_heading = atan2(desired_heading_y, desired_heading_x)

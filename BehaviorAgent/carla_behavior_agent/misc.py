@@ -3,6 +3,7 @@
 import math
 import numpy as np
 import carla
+from typing import Any
 
 def draw_waypoints(world, waypoints, z=0.5):
     """
@@ -161,56 +162,56 @@ def positive(num):
         :param num: value to check
     """
     return num if num > 0.0 else 0.0
+    
+def dist(a: Any, b: Any) -> float:
+    """
+    Calculate the distance between two objects: a and b. These two objects can be of type carla.Vehicle, carla.Waypoint, or carla.Location.
 
-def dist(a: any, b: any) -> float:
-        """
-        Calculate the distance between two objects: a and b. These two objects can be of type carla.Vehicle, carla.Waypoint, or carla.Location.
+    :param a: first object (carla.Actor, carla.Landmark, carla.Waypoint, or carla.Location)
+    :param b: second object (carla.Actor, carla.Landmark, carla.Waypoint, or carla.Location)
 
-        :param a: first object (carla.Actor, carla.Landmark, carla.Waypoint, or carla.Location)
-        :param b: second object (carla.Actor, carla.Landmark, carla.Waypoint, or carla.Location)
+    :return: distance between the two objects (float)
+    """
+    # Check if input 'a' is of type carla.Landmark and convert it to a carla.Waypoint object.
+    if isinstance(a, carla.Landmark):
+        a = a.waypoint
+    # Check if input 'b' is of type carla.Landmark and convert it to a carla.Waypoint object.
+    if isinstance(b, carla.Landmark):
+        b = b.waypoint
+        
+    # Check if input 'a' is of type carla.Transform and convert it to a carla.Location object.
+    if isinstance(a, carla.Transform):
+        a = a.location
+    # Check if input 'b' is of type carla.Transform and convert it to a carla.Location object.
+    if isinstance(b, carla.Transform):
+        b = b.location
 
-        :return: distance between the two objects (float)
-        """
-        # Check if input 'a' is of type carla.Landmark and convert it to a carla.Waypoint object.
-        if isinstance(a, carla.Landmark):
-            a = a.waypoint
-        # Check if input 'b' is of type carla.Landmark and convert it to a carla.Waypoint object.
-        if isinstance(b, carla.Landmark):
-            b = b.waypoint
-            
-        # Check if input 'a' is of type carla.Transform and convert it to a carla.Location object.
-        if isinstance(a, carla.Transform):
-            a = a.location
-        # Check if input 'b' is of type carla.Transform and convert it to a carla.Location object.
-        if isinstance(b, carla.Transform):
-            b = b.location
-
-        # Check if both input objects are of type carla.Actor.
-        if isinstance(a, carla.Actor) and isinstance(b, carla.Actor):
-            return a.get_location().distance(b.get_location())
-        # Check if input 'a' is of type carla.Actor and input 'b' is of type carla.Waypoint.
-        elif isinstance(a, carla.Actor) and isinstance(b, carla.Waypoint):
-            return a.get_location().distance(b.transform.location)
-        # Check if input 'a' is of type carla.Waypoint and input 'b' is of type carla.Actor.
-        elif isinstance(a, carla.Waypoint) and isinstance(b, carla.Actor):
-            return a.transform.location.distance(b.get_location())
-        # Check if both input objects are of type carla.Waypoint.
-        elif isinstance(a, carla.Waypoint) and isinstance(b, carla.Waypoint):
-            return a.transform.location.distance(b.transform.location)
-        # Check if input 'a' is of type carla.Location and input 'b' is of type carla.Location.
-        elif isinstance(a, carla.Actor) and isinstance(b, carla.Location):
-            return a.get_location().distance(b)
-        elif isinstance(a, carla.Location) and isinstance(b, carla.Actor):
-            return a.distance(b.get_location())
-        elif isinstance(a, carla.Location) and isinstance(b, carla.Waypoint):
-            return a.distance(b.transform.location)
-        elif isinstance(a, carla.Waypoint) and isinstance(b, carla.Location):
-            return a.transform.location.distance(b)
-        elif isinstance(a, carla.Location) and isinstance(b, carla.Location):
-            return a.distance(b)
-        # If none of the above conditions are met, raise a ValueError.
-        else:
-            raise ValueError("Invalid input types. Please provide either carla.Actor, carla.Landmark, carla.Waypoint, or carla.Location objects.")
+    # Check if both input objects are of type carla.Actor.
+    if isinstance(a, carla.Actor) and isinstance(b, carla.Actor):
+        return a.get_location().distance(b.get_location())
+    # Check if input 'a' is of type carla.Actor and input 'b' is of type carla.Waypoint.
+    elif isinstance(a, carla.Actor) and isinstance(b, carla.Waypoint):
+        return a.get_location().distance(b.transform.location)
+    # Check if input 'a' is of type carla.Waypoint and input 'b' is of type carla.Actor.
+    elif isinstance(a, carla.Waypoint) and isinstance(b, carla.Actor):
+        return a.transform.location.distance(b.get_location())
+    # Check if both input objects are of type carla.Waypoint.
+    elif isinstance(a, carla.Waypoint) and isinstance(b, carla.Waypoint):
+        return a.transform.location.distance(b.transform.location)
+    # Check if input 'a' is of type carla.Location and input 'b' is of type carla.Location.
+    elif isinstance(a, carla.Actor) and isinstance(b, carla.Location):
+        return a.get_location().distance(b)
+    elif isinstance(a, carla.Location) and isinstance(b, carla.Actor):
+        return a.distance(b.get_location())
+    elif isinstance(a, carla.Location) and isinstance(b, carla.Waypoint):
+        return a.distance(b.transform.location)
+    elif isinstance(a, carla.Waypoint) and isinstance(b, carla.Location):
+        return a.transform.location.distance(b)
+    elif isinstance(a, carla.Location) and isinstance(b, carla.Location):
+        return a.distance(b)
+    # If none of the above conditions are met, raise a ValueError.
+    else:
+        raise ValueError("Invalid input types. Please provide either carla.Actor, carla.Landmark, carla.Waypoint, or carla.Location objects.")
 
         
 def compute_distance_from_center(actor1 : carla.Actor, actor2 : carla.Actor = None, distance : float = 5) -> float:
