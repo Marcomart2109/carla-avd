@@ -236,7 +236,6 @@ def index():
                 background: #fff;
                 border-radius: 12px;
                 box-shadow: 0 0 12px rgba(0,0,0,0.1);
-                padding: 20px;
             }
             
             #left-panel {

@@ -69,8 +69,6 @@ class BehaviorAgent(BasicAgent):
         
         # Added a variable to track the state of the lateral offset
         self._lateral_offset_active = False
-        self._original_max_throttle = None  # To store the original max_throttle
-        self._overtake_throttle_modified = False  # Flag to indicate if throttle was changed during overtake
 
         # Logger Configuration
         self.logger = logging.getLogger('behavior_agent')
@@ -128,22 +126,6 @@ class BehaviorAgent(BasicAgent):
             :param debug: boolean for debugging
             :return control: carla.VehicleControl
         """
-
-        # --- Restoration logic for max_throttle ---
-        # Check if an overtake was active and throttle modified, but overtake is now finished.
-        if not self._overtake.in_overtake and self._overtake_throttle_modified:
-            if self._original_max_throttle is not None:
-                self._local_planner._vehicle_controller.max_throt = self._original_max_throttle
-                msg = f"Overtake finished: Max throttle restored to {self._local_planner._vehicle_controller.max_throt:.2f}."
-                self.send_log_to_console(msg)
-            else:
-                # Fallback: if original was somehow not stored, log a warning.
-                # Consider setting to a default if necessary, e.g., self._local_planner._vehicle_controller.max_throt = 0.75 (controller's default)
-                msg = "Overtake finished: _original_max_throttle was None. Throttle may not be correctly restored."
-                self.send_log_to_console(msg,"WARNING")
-
-            self._overtake_throttle_modified = False
-            self._original_max_throttle = None # Clear stored value
 
         # Update the information regarding the ego vehicle
         self._update_information()
@@ -281,7 +263,6 @@ class BehaviorAgent(BasicAgent):
                         if overtake_path:
                             msg = f"Overtake path found for bicycle {bicycle.id}. Initiating overtake."
                             self.send_log_to_console(msg)
-                            self.send_log_to_web("overtake", f"Overtake path found for bicycle {bicycle.id}.", "INFO")
                             self.__update_global_plan(overtake_path=overtake_path)
                             self.send_log_to_web("overtake", f"Starting the overtake of bicycle {bicycle.id}.", "ACTION")
 
@@ -365,10 +346,10 @@ class BehaviorAgent(BasicAgent):
             self._lateral_offset_active = False
                 
 
-        #############################################
-        ######## Vehicle Avoidance Behaviors ########
-        #############################################
-        # 1: Check for stop signs
+        
+        ##############################################
+        ################ STOP SIGN ###################
+        ##############################################
         stop_sign_state, stop_sign, stop_sign_distance = self.stop_sign_manager(self._vehicle)
         if stop_sign_state:
             # Distance is computed from the center of the car and the stop sign,
@@ -394,7 +375,9 @@ class BehaviorAgent(BasicAgent):
 
 
 
-        # 2: Check for vehicles
+        #############################################
+        ######## Vehicle Avoidance Behaviors ########
+        #############################################
         vehicle_state, vehicle, distance = self.collision_and_car_avoid_manager(ego_vehicle_wp)
 
 
@@ -427,7 +410,7 @@ class BehaviorAgent(BasicAgent):
                     # Calculate a dynamic distance_same_lane, e.g., 1 second of travel at current speed, min 5m.
                     # Convert current speed from m/s to km/h for self._speed, then back to m/s for distance.
                     # get_speed returns m/s.
-                    safe_approach_distance = max(5.0, get_speed(self._vehicle) * 1.0) 
+                    safe_approach_distance = max(3.0, get_speed(self._vehicle) * 1.0) 
 
                     overtake_path = self._overtake.run_step(
                         object_to_overtake=vehicle, 
@@ -437,15 +420,17 @@ class BehaviorAgent(BasicAgent):
                         speed_limit=self._vehicle.get_speed_limit() # Use current actual speed limit from vehicle
                     )
                     if overtake_path:
-                        msg = f"[INFO - Vehicle Avoidance] Overtake path found. Initiating overtake."
+                        msg = f" Overtake path found. Initiating overtake."
                         self.send_log_to_console(msg)
+                        self.send_log_to_web("overtake", msg, "ACTION")
                         self.__update_global_plan(overtake_path=overtake_path)
                         # self._overtake.in_overtake and self._overtake.overtake_cnt are set by self._overtake.run_step()
                         overtake_path_generated_this_step = True
                     else:
                         # Failed to find an overtake path, stop.
-                        msg = "[WARNING - Vehicle Avoidance] Failed to find an overtake path. Stopping."
+                        msg = "Failed to find an overtake path. Waiting."
                         self.send_log_to_console(msg, "WARNING")
+                        self.send_log_to_web("overtake", msg, "ACTION")
                         return self.emergency_stop()
                 
                 # If now in an overtake maneuver (either newly initiated or ongoing)
@@ -467,14 +452,6 @@ class BehaviorAgent(BasicAgent):
                         effective_max_speed = temp_normal_behavior.max_speed # Use Normal's max_speed
                         msg = f"Current behavior is Cautious. Using Normal's speed parameters for overtake."
                         self.send_log_to_console(msg)
-
-                        # ---- Modify max_throttle if Cautious during overtake ----
-                        if not self._overtake_throttle_modified:
-                            self._original_max_throttle = self._local_planner._vehicle_controller.max_throt
-                            self._local_planner._vehicle_controller.max_throt = 1.0
-                            self._overtake_throttle_modified = True
-                            msg = f"Overtake (Cautious): Max throttle temporarily set to 1.0 for faster acceleration."
-                            self.send_log_to_console(msg)
                                 
                     desired_overtake_speed = current_actual_speed_limit + overtake_speed_margin_kmh
                     
@@ -523,12 +500,15 @@ class BehaviorAgent(BasicAgent):
 
         # 4: Normal behavior
         else:
-            target_speed = min([
-                self._behavior.max_speed,
-                self._speed_limit - self._behavior.speed_lim_dist])
-            self._local_planner.set_speed(target_speed)
-            control = self._local_planner.run_step(debug=debug)
-            self._blocked = False
+            if not self._overtake.in_overtake:               
+                target_speed = min([
+                    self._behavior.max_speed,
+                    self._speed_limit - self._behavior.speed_lim_dist])
+                self._local_planner.set_speed(target_speed)
+                control = self._local_planner.run_step(debug=debug)
+                self._blocked = False
+            else:
+                control = self._local_planner.run_step(debug=debug)
         return control
 
     def _update_information(self):
@@ -817,7 +797,7 @@ class BehaviorAgent(BasicAgent):
         control.hand_brake = False
         return control
 
-    def static_obstacle_avoid_manager(self, waypoint, obj_filter="*static.prop*"):
+    def static_obstacle_avoid_manager(self, waypoint, obj_filter="*static.prop*", obj_ignore = ["static.prop.dirtdebris01","static.prop.dirtdebris02","static.prop.dirtdebris03"]):
         """
         Handles avoidance behavior for static obstacles.
         """
@@ -825,12 +805,14 @@ class BehaviorAgent(BasicAgent):
         props = self._world.get_actors().filter(obj_filter)
         props = [p for p in props if is_within_distance(p.get_transform(), self._vehicle.get_transform(), 40, angle_interval=[0, 90])]
 
+        # Filtra gli oggetti da ignorare
+        props = [p for p in props if not any(ignore_type in p.type_id for ignore_type in obj_ignore)]
+
         if not props:
             return False, None, -1
 
         props = sorted(props,key = lambda x: dist(x,waypoint))
-
-            
+        
         o_state, o, o_distance = self._vehicle_obstacle_detected(
             props, max(self._behavior.min_proximity_threshold, self._speed_limit / 2), up_angle_th=60
         )
@@ -838,7 +820,7 @@ class BehaviorAgent(BasicAgent):
         if o_state:
             if self._should_log_object("obstacle", o.id):
                 self.send_log_to_web("OBSTACLE", f"Static obstacle detected; {o}", "INFO")
-    
+
         return o_state, o, o_distance
 
     
