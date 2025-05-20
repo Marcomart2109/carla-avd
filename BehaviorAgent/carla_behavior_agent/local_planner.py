@@ -388,6 +388,12 @@ class LocalPlanner(object):
         '''
         self._vehicle_controller._lat_controller.offset = offset
 
+    def get_lateral_offset(self) -> float:
+        '''
+        Get the lateral offset of the controller.
+        '''
+        return self._vehicle_controller._lat_controller.offset
+
 
 def _retrieve_options(list_waypoints, current_waypoint):
     """

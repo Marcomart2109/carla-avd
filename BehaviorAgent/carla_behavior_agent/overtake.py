@@ -90,6 +90,9 @@ class Overtake(BasicAgent):
         # Check if there is a vehicle in the opposite lane that can obstruct the overtake maneuver.
         # NOTE: We assume that every vehicle in the opposite lane is moving at the speed limit.
         opposite_vehicle_distance = overtake_time * speed_limit / 3.6
+        # Aggiungi un margine di sicurezza
+        opposite_vehicle_distance *= 1.5  # Aumenta del 50% la distanza di ricerca
+        
         search_distance = self._overtake_ego_distance + opposite_vehicle_distance
 
         # Check if there is a vehicle in the opposite lane that can obstruct the overtake maneuver.
