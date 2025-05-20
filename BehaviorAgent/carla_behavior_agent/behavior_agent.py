@@ -197,9 +197,10 @@ class BehaviorAgent(BasicAgent):
             print(msg)
             self.logger.critical(msg)
 
-            overtake_path = self._overtake.run_step(
-                object_to_overtake=static_obstacle, ego_vehicle_wp=ego_vehicle_wp, distance_same_lane=1, distance_other_lane=20, distance_from_object=so_distance, speed_limit = self._speed_limit
-            )
+            if not ego_vehicle_wp.is_junction:
+                overtake_path = self._overtake.run_step(
+                    object_to_overtake=static_obstacle, ego_vehicle_wp=ego_vehicle_wp, distance_same_lane=1, distance_other_lane=20, distance_from_object=so_distance, speed_limit = self._speed_limit
+                )
 
             # Check if the overtake path was generated and start the overtake
             if overtake_path: 
@@ -257,9 +258,10 @@ class BehaviorAgent(BasicAgent):
                         self.logger.info(f"Bicycle {bicycle.id} is near the center of our lane. Attempting to overtake.")
                         print("--- Bicycle is near the center of the lane! We can try to overtake it.")
 
-                        overtake_path = self._overtake.run_step(
-                            object_to_overtake=bicycle, ego_vehicle_wp=ego_vehicle_wp, distance_same_lane=1, distance_from_object=b_distance, speed_limit = self._speed_limit
-                        )                                               
+                        if not ego_vehicle_wp.is_junction:
+                            overtake_path = self._overtake.run_step(
+                                object_to_overtake=bicycle, ego_vehicle_wp=ego_vehicle_wp, distance_same_lane=1, distance_from_object=b_distance, speed_limit = self._speed_limit
+                            )                                               
                         if overtake_path:
                             msg = f"Overtake path found for bicycle {bicycle.id}. Initiating overtake."
                             self.send_log_to_console(msg)
@@ -478,13 +480,14 @@ class BehaviorAgent(BasicAgent):
                     # get_speed returns m/s.
                     safe_approach_distance = max(3.0, get_speed(self._vehicle) * 1.0) 
 
-                    overtake_path = self._overtake.run_step(
-                        object_to_overtake=vehicle, 
-                        ego_vehicle_wp=ego_vehicle_wp, 
-                        distance_same_lane=safe_approach_distance,
-                        distance_from_object=distance, 
-                        speed_limit=self._vehicle.get_speed_limit() # Use current actual speed limit from vehicle
-                    )
+                    if not ego_vehicle_wp.is_junction:
+                        overtake_path = self._overtake.run_step(
+                            object_to_overtake=vehicle, 
+                            ego_vehicle_wp=ego_vehicle_wp, 
+                            distance_same_lane=safe_approach_distance,
+                            distance_from_object=distance, 
+                            speed_limit=self._vehicle.get_speed_limit() # Use current actual speed limit from vehicle
+                        )
                     if overtake_path:
                         msg = f" Overtake path found. Initiating overtake."
                         self.send_log_to_console(msg)
