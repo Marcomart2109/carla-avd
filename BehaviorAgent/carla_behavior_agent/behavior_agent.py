@@ -81,17 +81,7 @@ class BehaviorAgent(BasicAgent):
         # Logger Configuration
         self.logger = Logger(name="behavior_agent", log_dir="./carla_behavior_agent/logs/")
 
-        # Track the objects that have been logged to avoid duplicates
-        self._logged_objects = {
-            "pedestrian": {},
-            "bicycle": {},
-            "vehicle": {},
-            "obstacle": {},
-            "traffic_light": False,
-            "stop_sign": {},
-            "overtake": {}
-        }
-        
+
         # Stop sign handling
         self._at_stop_sign = False
         self._stop_sign_wait_time = 0
@@ -605,9 +595,6 @@ class BehaviorAgent(BasicAgent):
 
         if affected:
             self.logger.web_warning("TRAFFIC_LIGHT", "Red light detected")
-        else:
-            # Reset quando non siamo più influenzati dal semaforo
-            self._logged_objects["traffic_light"] = False
             
         return affected
     

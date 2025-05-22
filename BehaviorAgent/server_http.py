@@ -3,10 +3,7 @@ from flask import Flask, Response, request, jsonify
 
 import numpy as np
 import threading
-import base64
-import matplotlib.pyplot as plt
-from flask import send_file
-from io import BytesIO
+import base64   
 import time
 from collections import deque
 
@@ -22,7 +19,7 @@ class ServerData:
         self.__controls = {"throttle" : 0, "steer" : 0,"brake" : 0}
         
         # Aggiungi una struttura per i log
-        self.__logs = deque(maxlen=50)  # Mantiene solo gli ultimi 50 log
+        self.__logs = deque(maxlen=50) 
 
         self.rgb_lock = threading.Lock()
         self.depth_lock = threading.Lock()
@@ -107,6 +104,7 @@ def threaded(func):
     return wrapper
                     
 appData = ServerData()
+appData.clearLogs()  # Reset logs all'avvio del server
 
 def sendImagesToWeb(getFrame, lock):
     while True:
@@ -641,8 +639,12 @@ def index():
                 });
             }
             
-            getControls();
-            getLogs();
+            // Quando la pagina viene caricata, resetta i log
+            $(document).ready(function() {
+                clearLogs();  // Pulisce i log all'avvio
+                getControls();
+                getLogs();
+            });
         </script>
     </body>
     </html>
