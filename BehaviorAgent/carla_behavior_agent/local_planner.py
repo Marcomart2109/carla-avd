@@ -304,13 +304,7 @@ class LocalPlanner(object):
 
     def set_overtake_plan(self, overtake_plan : list, overtake_distance : float) -> list:
         """ 
-        Adds an overtake plan to the local planner. The overtake plan is a list of [carla.Waypoint, RoadOption] pairs.
-        The overtake distance is the distance to the end of the overtake plan at which the vehicle should return to the 
-        normal plan. So, the overtake plan is added to the local planner until this distance is reached.
-        
-        NOTE: The queue contains a list of [carla.Waypoint, RoadOption] pairs. The RoadOption is used to determine the
-        type of connection between the current waypoint and the next waypoint. So, we are interested only at the first 
-        element of the pair.
+        Adds an overtake plan to the local planner.
         
         :param overtake_plan: list of (carla.Waypoint, RoadOption)
         :param overtake_distance: float
@@ -326,45 +320,40 @@ class LocalPlanner(object):
                 return wpt
             except IndexError as i:
                 return None        
-          
+      
         def get_waypoint_index(wp2: carla.Waypoint) -> int:
             """
-            This function iterates through the waypoints in the plan and breaks the loop once a waypoint
-            outside the sampling radius is found after finding a waypoint within the radius. In other words, 
-            it returns the index of the next waypoint after the last waypoint within the sampling radius.
-            
-                :param wp2 (carla.Waypoint): waypoint to search in the plan
-                :return (int): index of the waypoint in the plan
+            Find the index of the waypoint in the queue that is closest to the given waypoint.
             """
-            # Get the length of the waypoints queue
-            waypoint_length = len(self._waypoints_queue)
-
-            idx = 0
-            # The first while loop iterates through the waypoints in the plan until it finds a waypoint whose distance from 
-            # the given waypoint is greater than the sampling radius.
-            while (idx < waypoint_length and self._waypoints_queue[idx][0].transform.location.distance(
-                    wp2.transform.location) > self._sampling_radius):
-                idx += 1
-            # The second while loop continues from the point where the first loop stopped and iterates through the waypoints until it finds
-            # a waypoint whose distance from the given waypoint is less than the sampling radius.
-            while (idx < waypoint_length and self._waypoints_queue[idx][0].transform.location.distance(
-                    wp2.transform.location) < self._sampling_radius):
-                idx += 1
-                
-            return idx
-
+            # Trova il primo waypoint nella coda che è sufficientemente vicino al waypoint dato
+            for i, (wp, _) in enumerate(self._waypoints_queue):
+                if wp.transform.location.distance(wp2.transform.location) < self._sampling_radius:
+                    return i
+            return len(self._waypoints_queue)
+            
         # Get the first waypoint at the overtake distance
         end_overtake_wp = get_waypoint(overtake_distance)
         # If the overtake plan is empty, return the current plan
         if not end_overtake_wp:
             return list(self._waypoints_queue)
-                
+            
         # Get the index of the end overtake waypoint in the plan
         idx = get_waypoint_index(end_overtake_wp)
-         
-        # Return the overtake plan
-        overtake_plan.extend(list(self._waypoints_queue)[idx:])
-        return overtake_plan
+    
+        # Crea un nuovo piano completo: percorso di sorpasso + resto del percorso originale
+        complete_plan = overtake_plan.copy()
+        if idx < len(self._waypoints_queue):
+            complete_plan.extend(list(self._waypoints_queue)[idx:])
+    
+        # IMPORTANTE: Aggiorna la coda dei waypoint con il nuovo piano
+        self._waypoints_queue.clear()
+        for wp in complete_plan:
+            self._waypoints_queue.append(wp)
+    
+        # Aggiorna anche il controller del veicolo
+        self._vehicle_controller.setWaypoints(self._waypoints_queue)
+     
+        return complete_plan
 
     def draw_waypoints(self, z = 0.2, size = 0.1, color = carla.Color(0, 255, 0)):
         """
@@ -393,17 +382,112 @@ class LocalPlanner(object):
         Get the lateral offset of the controller.
         '''
         return self._vehicle_controller._lat_controller.offset
+    
+    def _generate_lane_change_path(self, 
+                                   waypoint, 
+                                   direction = 'left',
+                                   distance_same_lane = 10.0,
+                                   distance_other_lane = 25.0, 
+                                   lane_change_distance = 25.0,
+                                   check= True, 
+                                   lane_changes= 1, 
+                                   step_distance= 4.5,
+                                   concorde= False):  
+        """
+        This methods generates a path that results in a lane change. Use the different distances to fine-tune the maneuver.
+        If the lane change is impossible, the returned path will be empty.
+
+        params:
+        - waypoint: starting waypoint of lane change
+        - direction: overtake direction,'left' if overtake should be executed going left wrt waypoint, 'right' if going right
+        - distance_same_lane: travelled distance in the same lane of 'waypoint'
+        - distance_other_lane: travelled distance in the lane after the lane change
+        - lane_change_distance: distance to move from 'waypoint' lane to the other', as horizontal component
+        - check: flag to verify if the lane change is permitted on the current road
+        - lane_changes: specifies how many lanes to move from 'waypoint' lane
+        """
+        # Initialize the plan with the current waypoint
+        plan = [(waypoint, RoadOption.LANEFOLLOW)]
+        # Initialize the option with the default value (LANEFOLLOW)
+        option = RoadOption.LANEFOLLOW
+
+        # 1. MOVE FORWARD IN THE CURRENT LANE
+        distance = 0
+        while distance < distance_same_lane:
+            next_wps = plan[-1][0].next(step_distance)
+            if not next_wps:
+                return []
+            next_wp = next_wps[0]
+            distance += next_wp.transform.location.distance(plan[-1][0].transform.location)
+            plan.append((next_wp, RoadOption.LANEFOLLOW))
+
+        if direction == 'left':
+            option = RoadOption.CHANGELANELEFT
+        elif direction == 'right':
+            option = RoadOption.CHANGELANERIGHT
+        else:
+            # ERROR, input value for change must be 'left' or 'right'
+            return []
+
+        lane_changes_done = 0
+        lane_change_distance = lane_change_distance / lane_changes
+
+        # 2. CHANGE LANES
+        while lane_changes_done < lane_changes:
+
+            # Move forward
+            next_wps = plan[-1][0].next(lane_change_distance)
+            if not next_wps:
+                return []
+            next_wp = next_wps[0]
+
+            # Check if the lane change is permitted (if the road has a left lane)
+            if direction == 'left':
+                if check and str(next_wp.lane_change) not in ['Left', 'Both']:
+                    return []
+                side_wp = next_wp.get_left_lane()
+            # Check if the lane change is permitted (if the road has a right lane)
+            else:
+                if check and str(next_wp.lane_change) not in ['Right', 'Both']:
+                    return []
+                side_wp = next_wp.get_right_lane()
+
+            # Check if the lane change is permitted (if the road has a left or right lane)
+            if not side_wp or side_wp.lane_type != carla.LaneType.Driving:
+                return []
+
+            # Update the plan
+            plan.append((side_wp, option))
+            lane_changes_done += 1
+
+        # 3. MOVE FORWARD IN THE NEW LANE
+        distance = 0
+        pivot = plan[-1][0].lane_id
+        while distance < distance_other_lane:
+            if waypoint.lane_id * pivot > 0 and concorde:
+                next_wps = plan[-1][0].next(step_distance)
+            else:
+                next_wps = plan[-1][0].previous(step_distance)
+            if not next_wps:
+                return []
+            next_wp = next_wps[0]
+            distance += next_wp.transform.location.distance(plan[-1][0].transform.location)
+            plan.append((next_wp, RoadOption.LANEFOLLOW))
+
+        return plan
 
 
 def _retrieve_options(list_waypoints, current_waypoint):
     """
-    Compute the type of connection between the current active waypoint and the multiple waypoints present in
-    list_waypoints. The result is encoded as a list of RoadOption enums.
+    Compute the type of connection between the current active waypoint and a target waypoint
+    (next_waypoint).
 
-    :param list_waypoints: list with the possible target waypoints in case of multiple options
-    :param current_waypoint: current active waypoint
-    :return: list of RoadOption enums representing the type of connection from the active waypoint to each
-             candidate in list_waypoints
+    :param current_waypoint: active waypoint
+    :param next_waypoint: target waypoint
+    :return: the type of topological connection encoded as a RoadOption enum:
+             RoadOption.STRAIGHT
+             RoadOption.LEFT
+             RoadOption.RIGHT
     """
     options = []
     for next_waypoint in list_waypoints:

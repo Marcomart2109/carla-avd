@@ -3,7 +3,7 @@ import threading
 import time
 import base64
 from matplotlib import pyplot as plt
-from log_manager import LogManager 
+from logger import Logger
 
 def threaded(func):
     def wrapper(*k, **kw):
@@ -43,7 +43,7 @@ class Streamer():
         self.verbose = False
 
         # Inizializza il LogManager
-        self.log_manager = LogManager()
+        self.log_manager = Logger()
 
         self.data = {
                 "url": "http://"+IP+":9803/new_frame",
@@ -187,5 +187,5 @@ class Streamer():
 
     def reset_logs(self):
         """Resetta i log e invia l'aggiornamento al server"""
-        self.log_manager.reset()
+        self.log_manager.reset_logs()
         self.send_data("Logs", {"logs": []})

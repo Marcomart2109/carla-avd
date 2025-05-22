@@ -243,3 +243,6 @@ def is_bicycle_near_center(vehicle_location : carla.Location, ego_vehicle_wp : c
     vehicle_y = vehicle_location.y
     lane_center_y = ego_vehicle_wp.transform.location.y
     return abs(vehicle_y - lane_center_y) < lane_center_offset
+
+
+
