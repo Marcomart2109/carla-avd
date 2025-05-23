@@ -22,7 +22,7 @@ class ObjectDetector:
         """Set the local planner reference."""
         self._local_planner = local_planner
         
-    def detect_vehicles(self, waypoint, max_distance=15, lane_offset=0, angle_th=30):
+    def detect_vehicles(self, waypoint, max_distance=30, lane_offset=0, angle_th=30):
         """Detects vehicles around the ego vehicle."""
         vehicle_list = self.world.get_actors().filter("*vehicle*")
         vehicle_list = [v for v in vehicle_list if dist(v, waypoint) < max_distance and v.id != self.vehicle.id]
@@ -102,6 +102,8 @@ class ObjectDetector:
             
         props = sorted(props, key=lambda x: dist(x, waypoint))
         
+        if obj_filter == "*static.prop.constructioncone*" and len(props) > 0:
+            return True, props[0], dist(props[0], waypoint) 
         # Use the vehicle detection logic for static obstacles
         o_state, o, o_distance = self._vehicle_obstacle_detected(
             props, max(self._behavior.min_proximity_threshold, self._behavior.max_speed / 2), up_angle_th=60

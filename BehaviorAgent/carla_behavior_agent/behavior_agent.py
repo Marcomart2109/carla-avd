@@ -41,7 +41,7 @@ class BehaviorAgent(BasicAgent):
         # Vehicle information
         self._speed = 0
         self._speed_limit = 0
-        self._approach_speed = 10
+        self._approach_speed = 15
         self._direction = None
         self._incoming_direction = None
         self._incoming_waypoint = None
@@ -95,9 +95,13 @@ class BehaviorAgent(BasicAgent):
         self._last_timer_cleanup = time.time()
 
         # Nuove variabili di stato per la gestione degli incroci
-        self._in_junction_state = False
+        self._in_tate = False
         self._in_junction_grace_period = False
         self._junction_grace_duration = 4.0  # Durata del periodo di grazia in secondi
+        
+        #Offset 
+        self._lateral_offset_active = False
+        self._lateral_offset_type = None  # 'cone', 'bicycle', None
 
     
     ################################
@@ -170,8 +174,9 @@ class BehaviorAgent(BasicAgent):
         ##################################################
         # DA CONTROLLARE
         so_state, static_obstacle, so_distance = self._object_detector.detect_static_obstacles(ego_vehicle_wp)
-        
-        if so_state is True:        
+        cone_state, static_obstacle_cone, so_distance_cone = self._object_detector.detect_static_obstacles(ego_vehicle_wp,max_distance= 20, obj_filter="*static.prop.constructioncone*")
+
+        if so_state:        
             distance = compute_distance_from_center(actor1 =self._vehicle, actor2 = static_obstacle, distance=so_distance)
 
             self.logger.critical(f"Static obstacle:{static_obstacle} detected, distance: {distance}")
@@ -205,6 +210,27 @@ class BehaviorAgent(BasicAgent):
                         return self.emergency_stop()
                 
                 return self._local_planner.run_step()
+            
+        if cone_state and not self._overtake_manager.in_overtake:
+            o_loc = static_obstacle_cone.get_location()
+            o_wp = self._map.get_waypoint(o_loc)
+            if o_wp.lane_id == ego_vehicle_wp.lane_id:
+                self._local_planner.set_lateral_offset(-2 * static_obstacle_cone.bounding_box.extent.y - self._vehicle.bounding_box.extent.y)
+                self.logger.web_debug("STATIC_OBSTACLE", f"Static obstacle {static_obstacle_cone} detected in the same lane, applying lateral offset")
+                self._lateral_offset_active = True
+                self._lateral_offset_type = 'cone'
+            else:
+                self._local_planner.set_lateral_offset(.1 * static_obstacle_cone.bounding_box.extent.y + self._vehicle.bounding_box.extent.y)
+                self.logger.web_debug("STATIC_OBSTACLE", f"Static obstacle {static_obstacle_cone} detected in a different lane")
+                self._lateral_offset_active = True
+                self._lateral_offset_type = 'cone'
+
+        elif self._lateral_offset_active and not cone_state and self._lateral_offset_type == 'cone':
+            self.logger.web_debug("STATIC_OBSTACLE", "No static obstacle detected, resetting cone lateral offset")
+            self._local_planner.set_lateral_offset(0.0)
+            self._lateral_offset_active = False
+            self._lateral_offset_type = None
+        
 
 
         #################################################
@@ -221,22 +247,21 @@ class BehaviorAgent(BasicAgent):
             bicycle_lane_id = bicycle_wp.lane_id
 
             # Get the yaw of the ego vehicle and the vehicle in front.
-            ego_current_yaw = self._vehicle.get_transform().rotation.yaw # Mantenere il segno per calcoli di angolo più precisi se necessario
+            ego_current_yaw = self._vehicle.get_transform().rotation.yaw
             bicycle_current_yaw = bicycle.get_transform().rotation.yaw
 
             # Calcola la differenza di yaw, normalizzandola tra -180 e 180
             diff_yaw = (bicycle_current_yaw - ego_current_yaw + 180) % 360 - 180
             
-            # Definisci una soglia per considerare una bicicletta "allineata" (es. +/- 20 gradi)
-            # e una soglia per considerarla "attraversante" (es. al di fuori di +/- 45 gradi dalla direzione opposta)
+            # Definisci una soglia per considerare una bicicletta "allineata"
             is_aligned_threshold = 20  # Gradi
 
-            # Controlla se i veicoli sono approssimativamente allineati (stessa direzione di marcia o quasi)
+            # Controlla se i veicoli sono approssimativamente allineati
             if abs(diff_yaw) < is_aligned_threshold:                   
                 # Controlla se la bicicletta è nella STESSA corsia del veicolo ego
                 if ego_lane_id == bicycle_lane_id:
                     self.logger.info("Bicycle {bicycle.id} detected in the SAME lane ({ego_lane_id}), aligned. Distance: {b_distance:.2f}m.")
-                    # Controlla se la bicicletta è vicina al centro della corsia. In questo caso, l'agente sorpasserà la bicicletta.
+                    # Controlla se la bicicletta è vicina al centro della corsia
                     if is_bicycle_near_center(vehicle_location=bicycle.get_location(), ego_vehicle_wp=ego_vehicle_wp) and get_speed(self._vehicle) < 0.1:
                         self.logger.info(f"Bicycle {bicycle.id} is near the center of our lane. Attempting to overtake.")
 
@@ -257,8 +282,13 @@ class BehaviorAgent(BasicAgent):
                         self.logger.info(f"Bicycle {bicycle.id} is in our lane, but not centered. Applying lateral offset.")
                         new_offset = -(2.5 * bicycle.bounding_box.extent.y + self._vehicle.bounding_box.extent.y)
                         self.logger.web_action("BICYCLE", f"Applying lateral offset of {new_offset:.2f}m to avoid bicycle {bicycle.id}")
-                        self._local_planner.set_lateral_offset(new_offset)
-                        self._lateral_offset_active = True
+                        
+                        # Solo se non c'è un offset per coni attivo
+                        if self._lateral_offset_type != 'cone':
+                            self._local_planner.set_lateral_offset(new_offset)
+                            self._lateral_offset_active = True
+                            self._lateral_offset_type = 'bicycle'
+                        
                         target_speed = min([
                             self._behavior.max_speed,
                             self._speed_limit - self._behavior.speed_lim_dist])
@@ -266,53 +296,40 @@ class BehaviorAgent(BasicAgent):
                         control = self._local_planner.run_step(debug=debug)
                 else: # La bicicletta è allineata (stessa direzione) ma in una corsia DIVERSA
                     self.logger.info(f"Bicycle {bicycle.id} detected in a different lane (Ego: {ego_lane_id}, Bicycle: {bicycle_lane_id}), aligned. No offset applied.")
-                    if self._lateral_offset_active:
+                    # Reset solo se non ci sono coni e l'offset era attivo per le biciclette
+                    if self._lateral_offset_active and not cone_state:
                         self.logger.both_action("BICYCLE", "Resetting previously active lateral offset as current bicycle is in a different lane.")
                         self._local_planner.set_lateral_offset(0.0)
                         self._lateral_offset_active = False
             
-            # CASO: Bicicletta NON allineata (potenzialmente attraversante o in direzione opposta)
+            # CASO: Bicicletta NON allineata
             else:
                 self.logger.info(f"Bicycle {bicycle.id} detected in a different lane (Ego: {ego_lane_id}, Bicycle: {bicycle_lane_id}), NOT aligned. Distance: {b_distance:.2f}m.")
-                # Verifica se la bicicletta sta effettivamente attraversando la nostra traiettoria
-                # Questo è un controllo semplificato. Una predizione di traiettoria sarebbe più robusta.
-                # Consideriamo "attraversante" se non è né allineata né in direzione opposta quasi parallela.
                 is_potentially_crossing = abs(diff_yaw) > is_aligned_threshold and abs(abs(diff_yaw) - 180) > is_aligned_threshold 
 
-                if is_potentially_crossing and b_distance < self._behavior.braking_distance * 2.5: # Distanza di sicurezza per reagire
+                if is_potentially_crossing and b_distance < self._behavior.braking_distance * 2.5:
                     self.logger.warning(f"Bicycle {bicycle.id} is potentially CROSSING at {b_distance:.2f}m. Initiating emergency stop or significant slowdown.")
-                    # Se molto vicina, arresto di emergenza completo
                     if b_distance < self._behavior.braking_distance:
                         self.logger.critical(f"Bicycle {bicycle.id} CRITICAL proximity while crossing. EMERGENCY STOP.")
                         return self.emergency_stop()
                     else:
-                        # Altrimenti, rallenta drasticamente per valutare meglio
-                        target_speed = min(self._approach_speed / 2, get_speed(self._vehicle) / 2) # Rallenta significativamente
-                        target_speed = max(target_speed, 0) # Non andare in retromarcia
+                        target_speed = min(self._approach_speed / 2, get_speed(self._vehicle) / 2)
+                        target_speed = max(target_speed, 0)
                         self.set_target_speed(target_speed)
                         self.logger.info(f"Bicycle {bicycle.id} is crossing. Slowing down to {target_speed:.1f} km/h.")
                         control = self._local_planner.run_step(debug=debug)
 
-                elif get_speed(bicycle) < 1 and b_distance < self._behavior.braking_distance * 2: # Non allineata, lenta/ferma e vicina
+                elif get_speed(bicycle) < 1 and b_distance < self._behavior.braking_distance * 2:
                     self.logger.info(f"Bicycle {bicycle.id} is NOT aligned, slow/stopped, and close. Decelerating to approach speed.")
                     self.set_target_speed(self._approach_speed)
                     control = self._local_planner.run_step(debug=debug)
                 
-                else: # Bicicletta non allineata, ma più lontana o in movimento in modo non immediatamente critico
-                      # In questo caso, potrebbe essere una bicicletta sul lato opposto della strada che si allontana
-                      # o una che ha già attraversato. Mantenere una velocità prudente.
+                else:
                     self.logger.info(f"Bicycle {bicycle.id} is NOT aligned, but not an immediate crossing threat. Maintaining cautious speed.")
-                    
-                    # Non fare nulla di specifico qui lascerebbe il controllo al comportamento di default successivo
-                    # Oppure, si potrebbe impostare una velocità leggermente ridotta per precauzione
-                    # target_speed = min(self._speed_limit - self._behavior.speed_lim_dist, self._behavior.max_speed)
-                    # self._local_planner.set_speed(target_speed)
-                    # control = self._local_planner.run_step(debug=debug)
-                    # Per ora, lasciamo che la logica di fallback gestisca questo,
-                    # ma se 'control' non è ancora impostato, verrà gestito dal car_following o dal lane_following.
 
-        elif self._lateral_offset_active: # Nessuna bicicletta rilevata, ma l'offset era attivo
-            self.logger.info(f"Bicycle offset was active, but no bicycle detected. Resetting lateral offset.")
+        # Reset del lateral offset solo se non ci sono né coni né biciclette rilevanti
+        elif self._lateral_offset_active and not cone_state:
+            self.logger.info(f"No bicycle or cone detected, resetting lateral offset.")
             self._local_planner.set_lateral_offset(0.0)
             self._lateral_offset_active = False
                 
@@ -337,7 +354,7 @@ class BehaviorAgent(BasicAgent):
         # Gestione della velocità in base allo stato dell'incrocio
 
         # if self._in_junction_state or (current_time - self._junction_exit_time < junction_grace_period):
-        #     # Siamo nell'incrocio o nel periodo di grazia: usa approach_speed
+        #     # Siamo nell'incrociante o nel periodo di grazia: usa approach_speed
 
         #     self.logger.web_debug("JUNCTION", f"Velocità mantenuta a {self._approach_speed} km/h nell'incrocio")
         #     self.set_target_speed(self._approach_speed)
@@ -348,7 +365,7 @@ class BehaviorAgent(BasicAgent):
         #############################################
         vehicle_state, vehicle, distance = self._object_detector.detect_vehicles(
             ego_vehicle_wp, 
-            max_distance=15, 
+            max_distance=30, 
             lane_offset=0 if self._direction == RoadOption.LANEFOLLOW else 
                          (-1 if self._direction == RoadOption.CHANGELANELEFT else 1),
             angle_th=30 if self._direction == RoadOption.LANEFOLLOW else 180
@@ -367,6 +384,10 @@ class BehaviorAgent(BasicAgent):
                 self.logger.web_debug("VEHICLE", f"VEICOLO DAVANTI, MI FERMO!")
                 self.logger.critical(f"Emergency stop due to vehicle proximity")
                 return self.emergency_stop()
+            elif distance < self._behavior.min_proximity_threshold*2 and not is_abandoned:
+                self.logger.web_debug("VEHICLE", f"VEICOLO DAVANTI, RALLENTO!")
+                target_speed = self._approach_speed
+                self._local_planner.set_speed(target_speed)
 
             if is_abandoned:
                 # If the vehicle is considered parked/abandoned, we can try to overtake it.
@@ -390,7 +411,7 @@ class BehaviorAgent(BasicAgent):
                 
                 # Se non è passato abbastanza tempo, continua ad aspettare
                 if elapsed_time < wait_time_before_overtake:
-                    return self.emergency_stop()  # Continua a fermarti e aspettare
+                    return self.emergency_stop()  # Continua a fermarti e aspetta
                 
                 overtake_path_generated_this_step = False
                 if not self._overtake_manager.in_overtake: # Only attempt to start a new overtake if not already in one
@@ -507,10 +528,10 @@ class BehaviorAgent(BasicAgent):
             # NUOVO: Fase di rallentamento anticipato
             # Se rilevo il segnale in lontananza, inizio a rallentare gradualmente
             elif distance < self._behavior.braking_distance * 2.5 and stop_sign.id not in self._stop_sign_respected:
-                target_speed = self._approach_speed
+
                 self.logger.web_debug("STOP_SIGN", f"Rallentamento anticipato per il segnale di stop {stop_sign.id}, distanza: {distance:.1f}m, velocità target: {target_speed:.1f} km/h")
                 self.logger.info(f"Approaching stop sign at {distance:.1f}m, slowing down to {target_speed:.1f} km/h")
-                self.set_target_speed(target_speed)
+                self.set_target_speed(self._approach_speed)
 
             return self._local_planner.run_step(debug=debug)
 
