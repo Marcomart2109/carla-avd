@@ -43,7 +43,7 @@ class ObjectDetector:
     def detect_pedestrians(self, direction, max_distance=12):
         """Detects pedestrians around the ego vehicle."""
         walker_list = self.world.get_actors().filter("*walker.pedestrian*")
-        max_distance = 10 if self.map.get_waypoint(self.vehicle.get_location()).is_junction else 20
+        max_distance = 10 if self.map.get_waypoint(self.vehicle.get_location()).is_junction else 30
 
         
         walker_list = [w for w in walker_list if 
