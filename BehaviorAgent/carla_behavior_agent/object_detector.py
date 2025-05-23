@@ -40,9 +40,12 @@ class ObjectDetector:
         
         return vehicle_state, vehicle, distance
     
-    def detect_pedestrians(self, direction, max_distance=20):
+    def detect_pedestrians(self, direction, max_distance=12):
         """Detects pedestrians around the ego vehicle."""
         walker_list = self.world.get_actors().filter("*walker.pedestrian*")
+        max_distance = 10 if self.map.get_waypoint(self.vehicle.get_location()).is_junction else 20
+
+        
         walker_list = [w for w in walker_list if 
                       is_within_distance(w.get_transform(), self.vehicle.get_transform(), 
                                        max_distance, angle_interval=[0, 90])]
@@ -51,6 +54,10 @@ class ObjectDetector:
             return False, None, -1
         
         speed_limit = self.vehicle.get_speed_limit()
+
+        if self.map.get_waypoint(self.vehicle.get_location()).is_junction:
+            return True, walker_list[0], dist(walker_list[0], self.map.get_waypoint(self.vehicle.get_location()))
+        
 
         if direction == RoadOption.CHANGELANELEFT:
             walker_state, walker, distance = self._vehicle_obstacle_detected(walker_list, max(

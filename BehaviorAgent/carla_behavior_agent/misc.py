@@ -245,4 +245,32 @@ def is_bicycle_near_center(vehicle_location : carla.Location, ego_vehicle_wp : c
     return abs(vehicle_y - lane_center_y) < lane_center_offset
 
 
+def distance_to_junction(waypoint, max_distance=100.0):
+    """
+    Calcola la distanza dal prossimo incrocio.
+    
+    :param waypoint: waypoint di partenza
+    :param max_distance: distanza massima da controllare
+    :return: distanza dall'incrocio più vicino o max_distance se non trovato
+    """
+    current_wp = waypoint
+    total_distance = 0.0
+    
+    while total_distance < max_distance:
+        # Controlla se siamo in un incrocio
+        if current_wp.is_junction:
+            return total_distance
+        
+        # Ottieni il prossimo waypoint
+        next_wps = current_wp.next(1.0)
+        if not next_wps:
+            return max_distance
+        
+        # Incrementa la distanza e aggiorna il waypoint
+        total_distance += 1.0
+        current_wp = next_wps[0]
+    
+    return max_distance
+
+
 

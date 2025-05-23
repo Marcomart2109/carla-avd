@@ -27,9 +27,9 @@ class BehaviorAgent(BasicAgent):
     are encoded in the agent, from cautious to a more aggressive ones.
     """
 
-    def __init__(self, vehicle, behavior='cautious', opt_dict={}, map_inst=None, grp_inst=None):
+    def __init__(self, vehicle, behavior='normal', opt_dict={}, map_inst=None, grp_inst=None):
         """
-        Constructor method.
+        Constructor method.  
 
             :param vehicle: actor to apply to local planner logic onto
             :param behavior: type of agent to apply
@@ -47,7 +47,7 @@ class BehaviorAgent(BasicAgent):
         self._incoming_waypoint = None
         self._min_speed = 5
         self._behavior = None
-        self._blocked = False
+        self.initialized = False
 
         # Parameters for agent behavior
         if behavior == 'cautious':
@@ -88,7 +88,12 @@ class BehaviorAgent(BasicAgent):
         self._stop_sign_waiting = False
         self._min_stop_time = 3.0  # Tempo minimo di attesa in secondi allo stop
         self._stop_sign_respected = {}  # Dizionario per tenere traccia degli stop già rispettati
-
+    
+        # Timer per i veicoli temporaneamente fermi
+        self._stopped_vehicles_timer = {}
+        self._timer_cleanup_interval = 30.0  # Pulisci i timer ogni 30 secondi
+        self._last_timer_cleanup = time.time()
+    
     ################################
     ########### RUN STEP ###########
     ################################
@@ -100,6 +105,9 @@ class BehaviorAgent(BasicAgent):
             :param debug: boolean for debugging
             :return control: carla.VehicleControl
         """
+        if not self.initialized:
+            self.logger.web_debug("BehaviorAgent", f"Initializing Behavior Agent set to: {self._behavior}")
+            self.initialized = True
 
         # Update the information regarding the ego vehicle
         self._update_information()
@@ -129,44 +137,38 @@ class BehaviorAgent(BasicAgent):
         ##############################################
         ####### Pedestrian Avoidance Behaviors #######
         ##############################################
-        # Sostituisco la chiamata a pedestrian_avoid_manager con detect_pedestrians
         walker_state, walker, w_distance = self._object_detector.detect_pedestrians(self._direction)
 
         if walker_state:
             # Distance is computed from the center of the car and the walker,
             # we use bounding boxes to calculate the actual distance
-            distance = max(0,w_distance - max(
-                walker.bounding_box.extent.y, walker.bounding_box.extent.x) - max(
-                    self._vehicle.bounding_box.extent.y, self._vehicle.bounding_box.extent.x))
             
-            # Debug message
-            self.logger.debug(f"[DEBUG - Pedestrian Avoidance] Pedestrian {walker} detected, distance 1: {distance}")
+            distance = compute_distance_from_center(actor1=self._vehicle, actor2=walker, distance=w_distance)
+            
+            self.logger.debug(f"Pedestrian {walker} detected, distance: {distance}")
             
             # Brake moment
-            if  distance < 8 * self._behavior.braking_distance:
-                target_speed = self._vehicle.get_velocity().length() / 2
-                self.set_target_speed(target_speed)
-                self.logger.info(f"[INFO - Walker Obstacle Avoidance] Target speed set to:{target_speed}\n[INFO] Distance to static obstacle: {distance}")
-                
-                # Complete stop only if extremely close
-                if distance < 2 * self._behavior.braking_distance:
-                    # Debug message
-                    self.logger.both_warning("WARNING",f"[WARNING - Walker Obstacle Avoidance] Emergency stop due to static obstacle proximity")
-                    return self.emergency_stop()
+            if distance <= 3:
+                self.logger.web_debug("PEDESTRIAN", f"MI FERMO PER IL PEDONE")
+                return self.emergency_stop()
+
+            else:
+                self.logger.web_debug("PEDESTRIAN", f"HO VISTO UN PEDONE, RALLENTO!")
+                self.set_target_speed(self._approach_speed)
+                return self._local_planner.run_step()
 
 
 
         ##################################################
         ########## Obstacle Avoidance Behaviors ##########
         ##################################################
-        # Sostituisco la chiamata a static_obstacle_avoid_manager con detect_static_obstacles
+        # DA CONTROLLARE
         so_state, static_obstacle, so_distance = self._object_detector.detect_static_obstacles(ego_vehicle_wp)
         
         if so_state is True:        
             distance = compute_distance_from_center(actor1 =self._vehicle, actor2 = static_obstacle, distance=so_distance)
 
-            # Debug message
-            self.logger.critical(f"[Static Obstacle Avoidance] Static obstacle:{static_obstacle} detected, distance: {distance}")
+            self.logger.critical(f"Static obstacle:{static_obstacle} detected, distance: {distance}")
 
             overtake_path = None
             if not ego_vehicle_wp.is_junction:
@@ -181,8 +183,7 @@ class BehaviorAgent(BasicAgent):
     
             # Check if the overtake path was generated and start the overtake
             if overtake_path: 
-        
-                self.logger.web_info("OVERTAKE", "Overtake Path Found", "INFO")
+                self.logger.web_info("OVERTAKE", "Overtake Path Found - OBSTACLE", "INFO")
                 self._overtake_manager.update_overtake_plan(overtake_path=overtake_path)
                 self.logger.web_action("OVERTAKE", "Starting the overtake", "ACTION")
             
@@ -203,10 +204,11 @@ class BehaviorAgent(BasicAgent):
         #################################################
         ######### Bicycle Avoidance Behaviors ##########
         ################################################
-        # Sostituisco la chiamata a bycicle_avoid_manager con detect_bicycles
+        # DA CONTROLLARE
         bicycle_state, bicycle, b_distance = self._object_detector.detect_bicycles(ego_vehicle_wp)
         
         if bicycle_state:
+            b_distance = compute_distance_from_center(actor1=self._vehicle, actor2=bicycle, distance=b_distance)
             # Ottieni l'ID della corsia del veicolo ego e della bicicletta
             ego_lane_id = ego_vehicle_wp.lane_id
             bicycle_wp = self._map.get_waypoint(bicycle.get_location())
@@ -271,10 +273,10 @@ class BehaviorAgent(BasicAgent):
                 # Consideriamo "attraversante" se non è né allineata né in direzione opposta quasi parallela.
                 is_potentially_crossing = abs(diff_yaw) > is_aligned_threshold and abs(abs(diff_yaw) - 180) > is_aligned_threshold 
 
-                if is_potentially_crossing and b_distance < self._behavior.braking_distance * 3: # Distanza di sicurezza per reagire
+                if is_potentially_crossing and b_distance < self._behavior.braking_distance: # Distanza di sicurezza per reagire
                     self.logger.warning(f"Bicycle {bicycle.id} is potentially CROSSING at {b_distance:.2f}m. Initiating emergency stop or significant slowdown.")
                     # Se molto vicina, arresto di emergenza completo
-                    if b_distance < self._behavior.braking_distance * 1.5:
+                    if b_distance < self._behavior.braking_distance * 2.5:
                         self.logger.critical(f"Bicycle {bicycle.id} CRITICAL proximity while crossing. EMERGENCY STOP.")
                         return self.emergency_stop()
                     else:
@@ -314,94 +316,108 @@ class BehaviorAgent(BasicAgent):
         ################ STOP SIGN ###################
         ##############################################
         stop_sign_state, stop_sign, stop_sign_distance = self.stop_sign_manager(self._vehicle)
-        is_junction = ego_vehicle_wp.is_junction
-
-        # Gestione incrocio e segnale di stop
-        if is_junction:
-            self.logger.both_info("JUNCTION", "Incrocio rilevato")
-            # Disabilitiamo il sorpasso negli incroci
-            if self._overtake_manager.in_overtake:
-                self.logger.warning("Aborting overtake in junction")
-                self._overtake_manager.in_overtake = False
-                self._overtake_manager.overtake_cnt = 0
-                # Reimpostiamo la velocità a un valore sicuro per l'incrocio
-                self.set_target_speed(min(self._approach_speed, self._speed_limit - 10))
-                self.logger.web_action("JUNCTION", "Sorpasso annullato nell'incrocio")
-            # Imposta la velocità di approccio all'incrocio (ridotta)
-            if not self._stop_sign_waiting:
-                target_speed = min(self._approach_speed, self._speed_limit - 10)
-                self.set_target_speed(target_speed)
-                self.logger.info(f"Setting junction approach speed to {target_speed} km/h")
 
         if stop_sign_state:
-            # Distance is computed from the center of the car and the stop sign
-            distance = stop_sign_distance
-            self.logger.info(f"Stop sign: {stop_sign} detected, distance: {distance}")
+            # Calcola la distanza effettiva tenendo conto delle dimensioni dei veicoli
+            distance = compute_distance_from_center(actor1=self._vehicle, distance=stop_sign_distance)
             
-            # Se siamo molto vicini allo stop e non ci siamo ancora fermati
-            if distance < self._behavior.braking_distance * 1.5 and not self._stop_sign_waiting:
-                self.logger.info(f"Approaching stop sign, slowing down to {self._approach_speed / 2:.1f} km/h")
-                self.set_target_speed(self._approach_speed / 2)
-                
-                # MODIFICA CRUCIALE: controlla se lo stop è già stato rispettato
-                if distance < self._behavior.braking_distance and not (stop_sign and stop_sign.id in self._stop_sign_respected):
-                    self.logger.both_action("STOP_SIGN", "Stopping at stop sign")
-                    self._stop_sign_waiting = True
-                    self._stop_sign_wait_time = time.time()
-                    return self.emergency_stop()
-                elif stop_sign and stop_sign.id in self._stop_sign_respected:
-                    # Log che stiamo ignorando uno stop già rispettato
-                    self.logger.both_debug("STOP_SIGN", f"Stop sign {stop_sign.id} already respected, proceeding")
-    
-            # Se ci siamo già fermati allo stop, controlliamo se possiamo ripartire
-            elif self._stop_sign_waiting:
-                # Controlliamo se abbiamo aspettato il tempo minimo
+            # Se siamo già in attesa ad uno stop
+            if self._stop_sign_waiting:
+                # Calcola quanto tempo abbiamo aspettato
                 wait_time = time.time() - self._stop_sign_wait_time
+                self.logger.web_debug("STOP_SIGN", f"Attesa allo stop: {wait_time:.1f}s / {self._min_stop_time}s")
                 
-                if wait_time < self._min_stop_time:
-                    self.logger.info(f"Waiting at stop sign for {wait_time:.1f}s")
-                    return self.emergency_stop()
+                # Se abbiamo aspettato abbastanza
+                if wait_time >= self._min_stop_time:
+                    # Segna lo stop come rispettato
+                    if stop_sign and hasattr(stop_sign, 'id'):
+                        self._stop_sign_respected[stop_sign.id] = time.time()
+                        self.logger.both_action("STOP_SIGN", f"Stop sign {stop_sign.id} rispettato, ripartenza")
+                    
+                    # Ripristina lo stato e imposta una velocità moderata per ripartire
+                    self._stop_sign_waiting = False
+                    target_speed = min(self._approach_speed / 2, self._speed_limit / 3)
+                    self.set_target_speed(target_speed)
+                    
+                    # Continua con l'esecuzione normale
+                    control = self._local_planner.run_step(debug=debug)
+                    return control
                 else:
-                    # Controlla se ci sono veicoli che hanno la precedenza
-                    vehicle_list = self._world.get_actors().filter("*vehicle*")
-                    
-                    # Filtra solo veicoli nelle vicinanze e non noi stessi
-                    # Usiamo la location del veicolo invece del waypoint per il calcolo della distanza
-                    ego_location = self._vehicle.get_location()
-                    nearby_vehicles = []
-                    
-                    for v in vehicle_list:
-                        if v.id != self._vehicle.id:
-                            # Calcola la distanza effettiva tra i veicoli
-                            distance = ego_location.distance(v.get_location())
-                            if distance < 15:  # Ridotto da 20m a 15m
-                                # Controlla se il veicolo è davvero all'incrocio (non dietro o su altre strade)
-                                v_wp = self._map.get_waypoint(v.get_location())
-                                if v_wp.is_junction and v_wp.is_junction == ego_vehicle_wp.is_junction:
-                                    nearby_vehicles.append(v)
-                    
-                    # Se ci sono veicoli con precedenza, continua ad aspettare
-                    if nearby_vehicles:
-                        self.logger.info(f"Waiting at stop sign, {len(nearby_vehicles)} vehicles with right of way detected")
-                        return self.emergency_stop()
-                    else:
-                        # Se non ci sono veicoli, possiamo ripartire
-                        self.logger.both_action("STOP_SIGN", "Proceeding after stop sign, no vehicles with right of way")
-                        
-                        # AGGIUNTA CRITICA: Salva l'ID dello stop nei segnali rispettati
-                        if stop_sign and hasattr(stop_sign, 'id'):
-                            self._stop_sign_respected[stop_sign.id] = time.time()
-                            self.logger.both_debug("STOP_SIGN", f"Stop sign {stop_sign.id} marked as respected")
-                        
-                        self._stop_sign_waiting = False
-                        target_speed = min(self._approach_speed, self._speed_limit - 10)
-                        self.set_target_speed(target_speed)
-                        return self._local_planner.run_step()
+                    # Non è ancora passato abbastanza tempo, continua a fermarti
+                    return self.emergency_stop()
+            
+            # Se non siamo in attesa ma siamo vicini a uno stop non ancora rispettato
+            elif distance < self._behavior.braking_distance and stop_sign.id not in self._stop_sign_respected:
+                self.logger.both_action("STOP_SIGN", "Fermata allo stop")
+                self._stop_sign_waiting = True
+                self._stop_sign_wait_time = time.time()
+                return self.emergency_stop()
+            
+            # Se lo stop è già stato rispettato, rallenta comunque in modo prudente
+            elif stop_sign.id in self._stop_sign_respected:
+                self.logger.info(f"Stop sign {stop_sign.id} già rispettato, rallento prudenzialmente")
+                target_speed = min(self._approach_speed, self._speed_limit - self._behavior.speed_lim_dist)
+                self.set_target_speed(target_speed)
+            
+            # NUOVO: Fase di rallentamento anticipato
+            # Se rilevo il segnale in lontananza, inizio a rallentare gradualmente
+            elif distance < self._behavior.braking_distance * 2.5 and stop_sign.id not in self._stop_sign_respected:
+                # Calcolo un fattore di rallentamento basato sulla distanza
+                # Più mi avvicino, più rallento
+                slow_factor = max(0.3, min(1.0, distance / (self._behavior.braking_distance * 2.5)))
+                target_speed = self._approach_speed * slow_factor
+                self.logger.web_debug("STOP_SIGN", f"Rallentamento anticipato per il segnale di stop {stop_sign.id}, distanza: {distance:.1f}m, velocità target: {target_speed:.1f} km/h")
+                self.logger.info(f"Approaching stop sign at {distance:.1f}m, slowing down to {target_speed:.1f} km/h")
+                self.set_target_speed(target_speed)
+
     
+        # Se stiamo per entrare in un incrocio o siamo già in uno
+        # Gestione della velocità negli incroci
+        current_in_junction = ego_vehicle_wp.is_junction
+
+        # Inizializza la variabile di stato se non esiste
+        if not hasattr(self, '_in_junction_state'):
+            self._in_junction_state = False
+            self._junction_exit_time = 0
+
+        # Periodo di grazia dopo l'uscita dall'incrocio (2 secondi)
+        junction_grace_period = 2.0
+        current_time = time.time()
+
+        # Rileva l'ingresso e l'uscita dall'incrocio
+        if (self._incoming_waypoint.is_junction or current_in_junction) and not self._in_junction_state:
+            # Prima di entrare nell'incrocio, verifica se è sicuro attraversarlo
+            can_cross = self.junction_manager(ego_vehicle_wp)
+            if not can_cross:
+                self.logger.web_action("JUNCTION", "Non è sicuro attraversare l'incrocio, mi fermo")
+                return self.emergency_stop()
+            
+            # Se è sicuro, procedi con il comportamento normale
+            self._in_junction_state = True
+            self.set_target_speed(self._approach_speed)  
+            self.logger.web_action("JUNCTION", f"Ingresso nell'incrocio, velocità ridotta a {self._approach_speed} km/h")
+            return self._local_planner.run_step()
+            
+            
+                
+        elif not current_in_junction and self._in_junction_state:
+            # Uscita dall'incrocio
+            self._in_junction_state = False
+            self._junction_exit_time = current_time
+            self.set_target_speed(self._approach_speed)  # Aggiungi questa chiamata!
+            self.logger.web_debug("JUNCTION", f"Uscita dall'incrocio, mantengo velocità ridotta a {self._approach_speed} km/h per periodo di grazia")
+            return self._local_planner.run_step()
+        # Gestione della velocità in base allo stato dell'incrocio
+        if self._in_junction_state or (current_time - self._junction_exit_time < junction_grace_period):
+            # Siamo nell'incrocio o nel periodo di grazia: usa approach_speed
+
+            self.logger.web_debug("JUNCTION", f"Velocità mantenuta a {self._approach_speed} km/h nell'incrocio")
+            self.set_target_speed(self._approach_speed)
+            return self._local_planner.run_step()
+            
         #############################################
         ######## Vehicle Avoidance Behaviors ########
         #############################################
-        # Sostituisco la chiamata a collision_and_car_avoid_manager con detect_vehicles
         vehicle_state, vehicle, distance = self._object_detector.detect_vehicles(
             ego_vehicle_wp, 
             max_distance=15, 
@@ -413,30 +429,47 @@ class BehaviorAgent(BasicAgent):
         if vehicle_state:
             # Distance is computed from the center of the two cars,
             # we use bounding boxes to calculate the actual distance
-            distance = distance - max(
-                vehicle.bounding_box.extent.y, vehicle.bounding_box.extent.x) - max(
-                    self._vehicle.bounding_box.extent.y, self._vehicle.bounding_box.extent.x)
+            distance = compute_distance_from_center(actor1=self._vehicle, actor2=vehicle, distance=distance)
             
             # Check if the car is legitimately stopped
             _, is_abandoned = self.is_vehicle_legitimately_stopped(vehicle)
-            self.logger.debug(f"Vehicle {vehicle} detected, distance: {distance}, is it abandoned? {is_abandoned}")
 
             # Emergency brake if the car is very close.
-            if distance < self._behavior.braking_distance and not self._blocked:
-                self.logger.critical(f"[INFO - Vehicle Avoidance] Emergency stop due to vehicle proximity")
-                self._blocked = True
+            if distance < self._behavior.braking_distance and not is_abandoned:
+                self.logger.web_debug("VEHICLE", f"VEICOLO DAVANTI, MI FERMO!")
+                self.logger.critical(f"Emergency stop due to vehicle proximity")
                 return self.emergency_stop()
 
             if is_abandoned:
                 # If the vehicle is considered parked/abandoned, we can try to overtake it.
-                self.logger.debug(f"[DEBUG - Vehicle Avoidance] Vehicle {vehicle} is parked/abandoned, attempting to overtake.")
+                self.logger.debug(f"Vehicle {vehicle} is parked/abandoned, attempting to overtake.")
+                
+                # Inizializza il dizionario di veicoli temporaneamente fermi se non esiste
+                if not hasattr(self, '_stopped_vehicles_timer'):
+                    self._stopped_vehicles_timer = {}
+                
+                current_time = time.time()
+                vehicle_id = vehicle.id
+                wait_time_before_overtake = 15.0  # Tempo di attesa in secondi prima di avviare il sorpasso
+                
+                # Registra il tempo di fermo del veicolo se non è già registrato
+                if vehicle_id not in self._stopped_vehicles_timer:
+                    self._stopped_vehicles_timer[vehicle_id] = current_time
+                    return self.emergency_stop()  # Fermati e aspetta mentre verifichi
+                
+                # Calcola quanto tempo è passato da quando il veicolo è stato rilevato come fermo
+                elapsed_time = current_time - self._stopped_vehicles_timer[vehicle_id]
+                
+                # Se non è passato abbastanza tempo, continua ad aspettare
+                if elapsed_time < wait_time_before_overtake:
+                    return self.emergency_stop()  # Continua a fermarti e aspettare
                 
                 overtake_path_generated_this_step = False
                 if not self._overtake_manager.in_overtake: # Only attempt to start a new overtake if not already in one
                     # Calculate a dynamic distance_same_lane, e.g., 1 second of travel at current speed, min 5m.
                     # Convert current speed from m/s to km/h for self._speed, then back to m/s for distance.
                     # get_speed returns m/s.
-                    safe_approach_distance = max(3.0, get_speed(self._vehicle) * 1.0) 
+                    safe_approach_distance = max(1.0, get_speed(self._vehicle) * 1.0) 
                     
                     overtake_path = None
                     if not ego_vehicle_wp.is_junction:
@@ -449,21 +482,16 @@ class BehaviorAgent(BasicAgent):
                         )
                         
                     if overtake_path: 
-                        self.logger.both_action("OVERTAKE", f" Overtake path found. Initiating overtake.")
+                        self.logger.both_action("OVERTAKE", f" Sorpasso possibile, avvio sorpasso")
                         self._overtake_manager.update_overtake_plan(overtake_path=overtake_path)
-                        # self._overtake.in_overtake and self._overtake.overtake_cnt are set by self._overtake.run_step()
                         overtake_path_generated_this_step = True
                     else:
                         # Failed to find an overtake path, stop.
-                        self.logger.both_warning("OVERTAKE", "Failed to find an overtake path. Waiting.")
+                        self.logger.both_warning("OVERTAKE", "IL VEICOLO E' DAVVERO FERMO, CERCO UN PERCORSO DI SORPASSO")
                         return self.emergency_stop()
-                
-                # If now in an overtake maneuver (either newly initiated or ongoing)
-                if self._overtake_manager.in_overtake:
-                    # Set a higher speed for overtaking.
-                    # The _update_information method (called at the start of run_step)
-                    # is responsible for checking oncoming traffic and aborting if necessary by changing the global plan.
-                    
+
+                if self._overtake_manager.in_overtake:  
+                    self.logger.web_debug("OVERTAKE", "SORPASSO IN CORSO")                 
                     current_actual_speed_limit = self._vehicle.get_speed_limit()
                     
                     effective_max_speed = self._behavior.max_speed
@@ -492,54 +520,56 @@ class BehaviorAgent(BasicAgent):
                         pass # target_speed is already set to encourage acceleration
                     elif current_speed_kmh > target_speed and self._overtake_manager.in_overtake : # if already faster than calculated target during overtake
                          target_speed = min(effective_max_speed, current_speed_kmh) # maintain current speed if safe, capped by max_speed
+                         self.logger.web_debug("OVERTAKE - ADJUSTING", f"Adjusting speed during overtake. Current speed: {current_speed_kmh:.2f} km/h, target speed: {target_speed:.2f} km/h.")
 
                     self._local_planner.set_speed(target_speed)
                     self.logger.info(f"[INFO - Overtake] Active overtake. Target speed: {target_speed:.2f} km/h. Current speed: {current_speed_kmh:.2f} km/h. Limit: {current_actual_speed_limit:.2f} km/h.")
-                # else:
-                    # If not self._overtake.in_overtake here, it implies the overtake either:
-                    # 1. Failed to start (emergency_stop was called).
-                    # 2. Finished in a previous step (normal speed logic will apply).
-                    # No specific speed setting here if not actively overtaking.
+                    
 
                 control = self._local_planner.run_step(debug=debug) # This will use the speed set above if overtaking
             
             else: # Vehicle is not abandoned
                 # If the vehicle is not parked, we can follow it
                 self.logger.debug(f"[DEBUG - Vehicle Avoidance] Vehicle {vehicle} is not parked, following.")
+                self.logger.web_debug("VEHICLE FOLLOWING", f"Vehicle following")
                 control = self.car_following_manager(vehicle, distance, debug=debug)
 
-        # 3: Intersection behavior
-        elif self._incoming_waypoint.is_junction and (self._incoming_direction in [RoadOption.LEFT, RoadOption.RIGHT]):
-            # Se siamo in attesa a uno stop, non procediamo
-            if self._stop_sign_waiting:
-                return self.emergency_stop()
+        # # 3: Intersection behavior
+        # elif self._incoming_waypoint.is_junction and (self._incoming_direction in [RoadOption.LEFT, RoadOption.RIGHT]):
+        #     self.logger.web_debug("JUNCTION", "Incrocio rilevato and direzione LEFT/RIGHT")
+        #     # Se siamo in attesa a uno stop, non procediamo
+        #     if self._stop_sign_waiting:
+        #         self.logger.web_debug("STOP_SIGN - ELIF pt.3", "In attesa a uno stop, non procedere")
+        #         return self.emergency_stop()
                 
-            target_speed = min([
-                self._behavior.max_speed,
-                self._speed_limit - 5]) 
-            self.logger.debug(f"[DEBUG - Intersection Behavior] Target speed set to:{target_speed}")
-            self._local_planner.set_speed(target_speed)            # Aggiungi questo nella sezione relativa agli incroci in run_step
-            if stop_sign_state and distance < self._behavior.braking_distance:
-                self.logger.both_action("STOP_SIGN", "Stopping at stop sign")
-                self._stop_sign_waiting = True
-                self._stop_sign_wait_time = time.time()
-                return self.emergency_stop()
-            elif is_junction:
-                # Controlla se possiamo attraversare l'incrocio
-                can_cross = self.junction_manager(ego_vehicle_wp)
-                if not can_cross:
-                    return self.emergency_stop()
-            control = self._local_planner.run_step(debug=debug)
+        #     target_speed = min([
+        #         self._approach_speed,
+        #         self._speed_limit - self._behavior.speed_lim_dist]) 
+        #     self.logger.debug(f"Target speed set to:{target_speed}")
+        #     self._local_planner.set_speed(target_speed)            # Aggiungi questo nella sezione relativa agli incroci in run_step
+        #     if stop_sign_state and distance < self._behavior.braking_distance:
+        #         self.logger.both_action("STOP_SIGN", "Stopping at stop sign")
+        #         self._stop_sign_waiting = True
+        #         self._stop_sign_wait_time = time.time()
+        #         return self.emergency_stop()
+        #     elif ego_vehicle_wp.is_junction:
+        #         # Controlla se possiamo attraversare l'incrocio
+        #         self.logger.web_debug("JUNCTION - ELIF pt.3", "Controlla se possiamo attraversare l'incrocio")
+        #         can_cross = self.junction_manager(ego_vehicle_wp)
+        #         if not can_cross:
+        #             self.logger.web_debug("JUNCTION - ELIF pt.3", "Non possiamo attraversare l'incrocio")
+        #             return self.emergency_stop()
+        #     control = self._local_planner.run_step(debug=debug)
 
         # 4: Normal behavior
         else:
-            if not self._overtake_manager.in_overtake:               
+            if not self._overtake_manager.in_overtake:         
                 target_speed = min([
                     self._behavior.max_speed,
                     self._speed_limit - self._behavior.speed_lim_dist])
                 self._local_planner.set_speed(target_speed)
                 control = self._local_planner.run_step(debug=debug)
-                self._blocked = False
+                self.logger.web_debug("Behavior", f"Nessun Evento Rilevato! Ho settato la velocità a: {target_speed:.2f} km/h, il limite della strada è {self._speed_limit:.2f} km/h")
             else:
                 control = self._local_planner.run_step(debug=debug)
         return control
@@ -549,6 +579,22 @@ class BehaviorAgent(BasicAgent):
         This method updates the information regarding the ego
         vehicle based on the surrounding world.
         """
+        # Cleanup dei timer dei veicoli fermi
+        self._cleanup_stopped_vehicles_timer()
+        
+        # Cleanup degli stop sign rispettati dopo un certo tempo
+        current_time = time.time()
+        expired_stops = []
+        for stop_id, timestamp in self._stop_sign_respected.items():
+            # Consideriamo "scaduto" un segnale di stop dopo 30 secondi
+            if current_time - timestamp > 30.0:
+                expired_stops.append(stop_id)
+    
+        for stop_id in expired_stops:
+            del self._stop_sign_respected[stop_id]
+            self.logger.debug(f"Stop sign {stop_id} rimosso dalla lista dei rispettati (scaduto)")
+    
+        # Resto del codice esistente...
         self._speed = get_speed(self._vehicle)
         self._speed_limit = self._vehicle.get_speed_limit()
         self._local_planner.set_speed(self._speed_limit)
@@ -560,6 +606,7 @@ class BehaviorAgent(BasicAgent):
 
         self._incoming_waypoint, self._incoming_direction = self._local_planner.get_incoming_waypoint_and_direction(
             steps=self._look_ahead_steps)
+        
         if self._incoming_direction is None:
             self._incoming_direction = RoadOption.LANEFOLLOW
 
@@ -569,21 +616,6 @@ class BehaviorAgent(BasicAgent):
             self._local_planner.draw_waypoints(color=carla.Color(0, 255, 0))
         else: 
             self._overtake_manager.in_overtake = False
-
-        # Reset stop sign waiting state if we've moved away from any stop sign or if we're waiting too long
-        if self._stop_sign_waiting:
-            stop_sign_present, _, distance = self.stop_sign_manager(self._vehicle, sign_distance=30)
-            current_time = time.time()
-            wait_duration = current_time - self._stop_sign_wait_time
-            
-            # Resettiamo se ci siamo allontanati o se abbiamo aspettato troppo (30 secondi max)
-            if not stop_sign_present or distance > 15 or wait_duration > 30.0:
-                reason = "moved away from stop" if not stop_sign_present or distance > 15 else "timeout after 30s"
-                self.logger.both_action("STOP_SIGN", f"Stop sign no longer relevant ({reason}), resetting state")
-                self._stop_sign_waiting = False
-                # Impostiamo una velocità bassa ma non zero per assicurare che il veicolo si muova
-                target_speed = min(self._approach_speed / 2, self._speed_limit / 2)
-                self.set_target_speed(target_speed)
 
     def traffic_light_manager(self):
         """
@@ -598,21 +630,22 @@ class BehaviorAgent(BasicAgent):
             
         return affected
     
-    def stop_sign_manager(self, vehicle : carla.Vehicle, sign_distance : int = 20):
+    def stop_sign_manager(self, vehicle: carla.Vehicle, sign_distance: int = 40):
         """
-        This method is in charge of behaviors for stop signs.
+        Gestisce il rilevamento dei segnali di stop.
+    
+        :param vehicle: veicolo dell'agente
+        :param sign_distance: distanza massima di rilevamento del segnale
+        :return: (affected, signal, distance) tuple con stato, segnale e distanza
         """
         affected, signal = self._affected_by_sign(vehicle=vehicle, sign_type="206", max_distance=sign_distance)
         distance = -1 if not affected else dist(a=vehicle, b=signal)
         
-        # Se il segnale è stato rispettato di recente, lo ignoriamo
+        # Se il segnale è stato rispettato di recente, lo notifichiamo ma non ci fermiamo
         if affected and signal and signal.id in self._stop_sign_respected:
             last_respect_time = self._stop_sign_respected[signal.id]
             if time.time() - last_respect_time < 30.0:  # 30 secondi di "immunità" dopo aver rispettato lo stop
-                return False, None, -1
-    
-        if affected:
-            self.logger.web_info("STOP_SIGN", f"Stop sign detected at {distance:.2f}m")
+                self.logger.debug(f"Stop sign {signal.id} già rispettato recentemente")
     
         return affected, signal, distance
 
@@ -713,104 +746,118 @@ class BehaviorAgent(BasicAgent):
 
     def junction_manager(self, ego_vehicle_wp):
         """
-        Gestisce la logica di attraversamento degli incroci.
+        Gestisce l'attraversamento degli incroci.
     
-        :param ego_vehicle_wp: waypoint del veicolo
-        :return: (bool) True se è sicuro attraversare, False altrimenti
+        :param ego_vehicle_wp: waypoint attuale del veicolo
+        :return: True se è sicuro attraversare, False altrimenti
         """
+        # Verifica se siamo in un incrocio
         if not ego_vehicle_wp.is_junction:
             return True
     
-        # Ottieni il tipo di incrocio e la direzione pianificata
+        # Ottieni l'oggetto junction
         junction = ego_vehicle_wp.get_junction()
-        _, direction = self._local_planner.get_incoming_waypoint_and_direction(steps=self._look_ahead_steps)
+        if not junction:
+            return True
     
-        # Se siamo fermi a uno stop, controlliamo se è sicuro ripartire
-        if self._stop_sign_waiting:
-            wait_time = time.time() - self._stop_sign_wait_time
-        
-            # Dobbiamo aspettare almeno il tempo minimo
-            if wait_time < self._min_stop_time:
-                self.logger.info(f"Waiting at stop sign for {wait_time:.1f}s")
-                return False
-        
-            # Prima di tutto, ricerchiamo lo stop sign che stiamo rispettando per salvarlo
-            # come rispettato e non doverci fermare di nuovo
-            _, stop_sign, _ = self.stop_sign_manager(self._vehicle, sign_distance=30)
-            if stop_sign and hasattr(stop_sign, 'id'):
-                # Marchiamo subito come rispettato, prima di controllare i veicoli
-                self._stop_sign_respected[stop_sign.id] = time.time()
-                self.logger.both_debug("STOP_SIGN", f"Stop sign {stop_sign.id} marcato come rispettato")
-        
-            # Controlliamo i veicoli nelle vicinanze dell'incrocio
-            junction_radius = math.sqrt(junction.bounding_box.extent.y**2 + junction.bounding_box.extent.x**2)
-        
-            # Ottieni i veicoli distinti per direzione
-            vehicles = self._categorize_vehicles_at_junction(junction, ego_vehicle_wp)
-        
-            # Applica le regole di precedenza in base alla direzione pianificata
-            can_proceed = self._check_junction_rules(vehicles, direction)
-        
-            if can_proceed:
-                self.logger.action("Nessun veicolo con precedenza, attraversamento sicuro")
-                self.logger.web_action("STOP_SIGN", "Ripartenza dopo lo stop")
-                
-                self._stop_sign_waiting = False
-                return True
-            else:
-                self.logger.info("Veicoli con precedenza rilevati, attendere")
-                return False
+        # Ottieni la direzione pianificata dal local planner
+        planned_direction = None
+        if self._local_planner.target_road_option in [RoadOption.LEFT, RoadOption.RIGHT, RoadOption.STRAIGHT]:
+            planned_direction = self._local_planner.target_road_option
+        else:
+            # Se non abbiamo una direzione chiara, usiamo STRAIGHT come default
+            planned_direction = RoadOption.STRAIGHT
     
-        return True
+        # Categorizza i veicoli nell'incrocio
+        vehicles = self._categorize_vehicles_at_junction(junction, ego_vehicle_wp)
+        
+        # Verifica se possiamo attraversare in sicurezza
+        can_cross = self._check_junction_rules(vehicles, planned_direction)
+        
+        # Log della decisione
+        if can_cross:
+            self.logger.web_action("JUNCTION", f"Attraversamento sicuro dell'incrocio (direzione: {planned_direction})")
+        else:
+            self.logger.web_debug("JUNCTION", f"Attesa all'incrocio (direzione: {planned_direction})")
+    
+        return can_cross
 
     def _categorize_vehicles_at_junction(self, junction, ego_vehicle_wp):
         """
-        Categorizza i veicoli nell'incrocio per posizione (destra, sinistra, frontale).
+        Categorizza i veicoli nell'incrocio in base alla loro posizione relativa.
+    
+        :param junction: oggetto junction
+        :param ego_vehicle_wp: waypoint del veicolo ego
+        :return: dizionario con veicoli categorizzati per direzione
         """
-        # Ottieni il punto centrale dell'incrocio
-        pivot = carla.Transform(junction.bounding_box.location, ego_vehicle_wp.transform.rotation)
-    
-        # Raggio di rilevamento
-        junction_radius = math.sqrt(junction.bounding_box.extent.y**2 + junction.bounding_box.extent.x**2)
-    
-        # Ottieni tutti i veicoli vicini
-        vehicle_list = self._world.get_actors().filter("*vehicle*")
-        vehicle_list = [v for v in vehicle_list if v.id != self._vehicle.id]
-    
-        # Calcola l'orientamento rispetto all'incrocio
-        yaw = math.radians(pivot.rotation.yaw)
-        front_vector = np.array([np.cos(yaw), np.sin(yaw), 0])
-    
-        # Dizionario per veicoli in ogni direzione
         vehicles = {"left": [], "right": [], "front": []}
     
-        for vehicle in vehicle_list:
-            if vehicle.id == self._vehicle.id:
-                continue
-            
-            # Controlla se il veicolo è effettivamente all'incrocio
-            vehicle_wp = self._map.get_waypoint(vehicle.get_location())
-            if not vehicle_wp.is_junction or vehicle_wp.get_junction().id != junction.id:
-                continue
-            
-            # Calcola la posizione relativa del veicolo
-            vehicle_pos = np.array([vehicle.get_location().x, vehicle.get_location().y, vehicle.get_location().z])
-            pivot_pos = np.array([pivot.location.x, pivot.location.y, pivot.location.z])
-            vec = vehicle_pos - pivot_pos
+        # Ottieni la posizione e la direzione del veicolo
+        ego_vehicle = self._vehicle
+        ego_location = ego_vehicle.get_location()
+        ego_transform = ego_vehicle.get_transform()
+        ego_forward = ego_transform.get_forward_vector()
+    
+        # Raggruppa tutti i veicoli in prossimità dell'incrocio (entro 25 metri)
+        vehicles_list = []
+        for vehicle in self._world.get_actors().filter('vehicle.*'):
+            if vehicle.id == ego_vehicle.id:
+                continue  # Salta il veicolo ego
         
-            # Calcola prodotto vettoriale e scalare
-            cross = np.cross(front_vector, vec)[2]
-            dot = np.dot(front_vector, vec[:2])
+            vehicle_location = vehicle.get_location()
+            vehicle_wp = self._map.get_waypoint(vehicle_location)
         
-            # Categorizza in base alla posizione
-            if abs(cross) < abs(dot):
-                if dot > 0:
-                    vehicles["front"].append(vehicle)
+            # Calcola la distanza dal veicolo ego
+            distance = vehicle_location.distance(ego_location)
+        
+            # Considera solo veicoli entro 25 metri e in prossimità dell'incrocio
+            if distance <= 25.0 and (vehicle_wp.is_junction or 
+                                    distance_to_junction(vehicle_wp) < 10.0):
+                vehicles_list.append((vehicle, distance))
+    
+        # Ordina i veicoli per distanza
+        vehicles_list.sort(key=lambda x: x[1])
+    
+        # Categorizza i veicoli in base alla loro posizione relativa
+        for vehicle, _ in vehicles_list:
+            vehicle_location = vehicle.get_location()
+            vehicle_transform = vehicle.get_transform()
+            vehicle_forward = vehicle_transform.get_forward_vector()
+        
+            # Calcola il vettore dal veicolo ego al veicolo target
+            to_vehicle = vehicle_location - ego_location
+            to_vehicle = carla.Vector3D(to_vehicle.x, to_vehicle.y, 0)
+            to_vehicle_norm = math.sqrt(to_vehicle.x**2 + to_vehicle.y**2)
+        
+            if to_vehicle_norm < 0.001:
+                continue  # Evita la divisione per zero
+        
+            to_vehicle = carla.Vector3D(to_vehicle.x/to_vehicle_norm, to_vehicle.y/to_vehicle_norm, 0)
+        
+            # Calcola i prodotti scalari per determinare la posizione relativa
+            forward_dot = ego_forward.x * to_vehicle.x + ego_forward.y * to_vehicle.y
+            right_vector = carla.Vector3D(ego_forward.y, -ego_forward.x, 0)
+            right_dot = right_vector.x * to_vehicle.x + right_vector.y * to_vehicle.y
+        
+            # Determina la categoria in base agli angoli
+            if forward_dot >= 0.7:  # Angolo piccolo, veicolo davanti
+                vehicles["front"].append(vehicle)
+            elif right_dot >= 0.7:  # Veicolo a destra
+                vehicles["right"].append(vehicle)
+            elif right_dot <= -0.7:  # Veicolo a sinistra
+                vehicles["left"].append(vehicle)
+            elif forward_dot <= -0.7:  # Veicolo dietro (non ci interessa)
+                pass
             else:
-                if cross < 0:
-                    vehicles["left"].append(vehicle)
+                # Casi intermedi, classifichiamo in base all'angolo maggiore
+                if abs(right_dot) > abs(forward_dot):
+                    if right_dot > 0:
+                        vehicles["right"].append(vehicle)
+                    else:
+                        vehicles["left"].append(vehicle)
                 else:
-                    vehicles["right"].append(vehicle)
+                    if forward_dot > 0:
+                        vehicles["front"].append(vehicle)
     
         # Aggiungi questi log di debug alla fine del metodo
         self.logger.debug(f"Veicoli categorizzati all'incrocio: sinistra:{len(vehicles['left'])}, destra:{len(vehicles['right'])}, frontali:{len(vehicles['front'])}")
@@ -820,21 +867,29 @@ class BehaviorAgent(BasicAgent):
 
     def _check_junction_rules(self, vehicles, planned_direction):
         """
-        Applica le regole di precedenza negli incroci.
-    
+        Applica le regole di precedenza negli incroci, considerando solo i veicoli
+        che possono interferire con la nostra traiettoria.
+        
         :param vehicles: dizionario con veicoli classificati per direzione
         :param planned_direction: direzione pianificata (RoadOption)
         :return: True se è sicuro procedere, False altrimenti
         """
+        # Filtra i veicoli prima di fare i controlli di sicurezza
+        filtered_vehicles = self._filter_relevant_vehicles(vehicles, planned_direction)
+        
+        # Log dei veicoli rilevanti dopo il filtraggio
+        self.logger.web_debug("JUNCTION", f"Veicoli rilevanti dopo filtraggio - sinistra:{len(filtered_vehicles['left'])}, "
+                                        f"destra:{len(filtered_vehicles['right'])}, fronte:{len(filtered_vehicles['front'])}")
+        
         # Ottieni il primo veicolo in ogni direzione (più vicino)
-        vehicle_left = vehicles["left"][0] if vehicles["left"] else None
-        vehicle_right = vehicles["right"][0] if vehicles["right"] else None
-        vehicle_front = vehicles["front"][0] if vehicles["front"] else None
-    
-        # Se non ci sono veicoli, è sicuro procedere
+        vehicle_left = filtered_vehicles["left"][0] if filtered_vehicles["left"] else None
+        vehicle_right = filtered_vehicles["right"][0] if filtered_vehicles["right"] else None
+        vehicle_front = filtered_vehicles["front"][0] if filtered_vehicles["front"] else None
+
+        # Se non ci sono veicoli rilevanti, è sicuro procedere
         if not vehicle_left and not vehicle_right and not vehicle_front:
             return True
-    
+
         # Logica per direzione DIRITTA
         if planned_direction == RoadOption.STRAIGHT:
             # Controlla i veicoli da sinistra (potrebbero attraversare)
@@ -847,7 +902,7 @@ class BehaviorAgent(BasicAgent):
             result = left_is_safe and right_is_safe and front_is_safe
             self.logger.web_debug("JUNCTION", f"Direzione DRITTO - Sicurezza: sinistra:{left_is_safe}, destra:{right_is_safe}, fronte:{front_is_safe}")
             return result
-    
+
         # Logica per SVOLTA A SINISTRA
         elif planned_direction == RoadOption.LEFT:
             # Controlla i veicoli frontali (che vanno dritto o a destra)
@@ -855,12 +910,12 @@ class BehaviorAgent(BasicAgent):
                                                         self._is_vehicle_turning_right(vehicle_front))
             # Controlla i veicoli da destra (che vanno dritto o a sinistra)
             right_is_safe = vehicle_right is None or not (self._is_vehicle_going_straight(vehicle_right) or 
-                                                         self._is_vehicle_turning_left(vehicle_right))
+                                                        self._is_vehicle_turning_left(vehicle_right))
         
             result = front_is_safe and right_is_safe
             self.logger.web_debug("JUNCTION", f"Direzione SINISTRA - Sicurezza: fronte:{front_is_safe}, destra:{right_is_safe}")
             return result
-    
+
         # Logica per SVOLTA A DESTRA
         elif planned_direction == RoadOption.RIGHT:
             # Controlla i veicoli frontali (che svoltano a sinistra)
@@ -871,35 +926,291 @@ class BehaviorAgent(BasicAgent):
             result = front_is_safe and left_is_safe
             self.logger.web_debug("JUNCTION", f"Direzione DESTRA - Sicurezza: fronte:{front_is_safe}, sinistra:{left_is_safe}")
             return result
-    
+
         # Per altre situazioni, sii cauto
         return False
+    
+    def _filter_relevant_vehicles(self, vehicles, planned_direction):
+        """
+        Filtra i veicoli per considerare solo quelli che potrebbero interferire con la nostra traiettoria.
+        
+        :param vehicles: dizionario con veicoli classificati per direzione
+        :param planned_direction: direzione pianificata (RoadOption)
+        :return: dizionario con veicoli filtrati
+        """
+        filtered = {"left": [], "right": [], "front": []}
+        ego_vehicle = self._vehicle
+        ego_location = ego_vehicle.get_location()
+        ego_waypoint = self._map.get_waypoint(ego_location)
+        
+        # Ottieni la traiettoria pianificata attraverso l'incrocio
+        planned_path = self._get_junction_path(ego_waypoint, planned_direction)
+        
+        # Funzione per verificare se un veicolo può interferire con la nostra traiettoria
+        def could_interfere(vehicle):
+            # Ottieni waypoint del veicolo
+            vehicle_location = vehicle.get_location()
+            vehicle_waypoint = self._map.get_waypoint(vehicle_location)
+            
+            # Se il veicolo è fermo e non è sulla nostra corsia, probabilmente non interferisce
+            vehicle_speed = get_speed(vehicle)
+            if vehicle_speed < 0.5:  # quasi fermo (0.5 m/s ≈ 1.8 km/h)
+                # Verifica se è sulla nostra stessa strada/corsia
+                if not self._is_on_same_lane(vehicle_waypoint, planned_path):
+                    self.logger.web_debug("JUNCTION", f"Veicolo {vehicle.id} ignorato: fermo e non sulla nostra traiettoria")
+                    return False
+            
+            # Per veicoli in movimento, verifica potenziale intersezione con la nostra traiettoria
+            return self._could_paths_intersect(vehicle, planned_path)
+        
+        # Filtra i veicoli in ciascuna direzione
+        for direction in ["left", "right", "front"]:
+            filtered[direction] = [v for v in vehicles[direction] if could_interfere(v)]
+        
+        return filtered
+    
+
+    def _is_on_same_lane(self, vehicle_waypoint, planned_path):
+        """
+        Verifica se un waypoint è sulla stessa corsia del percorso pianificato.
+        
+        :param vehicle_waypoint: waypoint del veicolo
+        :param planned_path: lista di waypoint del percorso pianificato
+        :return: True se è sulla stessa corsia, False altrimenti
+        """
+        # Se il percorso è vuoto, consideriamo che non sia sulla stessa corsia
+        if not planned_path:
+            return False
+        
+        # Controlla se il waypoint del veicolo è sulla stessa corsia di uno dei waypoint pianificati
+        for wp in planned_path:
+            # Verifica se hanno lo stesso road_id e lane_id
+            if (vehicle_waypoint.road_id == wp.road_id and 
+                vehicle_waypoint.lane_id == wp.lane_id):
+                return True
+        
+        return False
+    
+
+    def _could_paths_intersect(self, vehicle, planned_path):
+        """
+        Verifica se la traiettoria del veicolo potrebbe intersecare il nostro percorso pianificato.
+        
+        :param vehicle: veicolo da controllare
+        :param planned_path: lista di waypoint del percorso pianificato
+        :return: True se le traiettorie potrebbero intersecarsi, False altrimenti
+        """
+        # Se non abbiamo un percorso pianificato, assumiamo che potrebbero intersecarsi
+        if not planned_path:
+            return True
+        
+        vehicle_location = vehicle.get_location()
+        vehicle_wp = self._map.get_waypoint(vehicle_location)
+        
+        # Ottieni la traiettoria prevista del veicolo
+        vehicle_future_waypoints = []
+        next_wp = vehicle_wp
+        
+        # Proietta la traiettoria del veicolo per 10 metri
+        for _ in range(5):
+            next_wps = next_wp.next(2.0)
+            if not next_wps:
+                break
+            next_wp = next_wps[0]
+            vehicle_future_waypoints.append(next_wp)
+        
+        # Verifica se le traiettorie si intersecano
+        for v_wp in vehicle_future_waypoints:
+            for p_wp in planned_path:
+                # Calcola distanza tra i waypoint
+                dist = v_wp.transform.location.distance(p_wp.transform.location)
+                if dist < 3.0:  # Soglia di 3 metri per considerare un'intersezione
+                    return True
+        
+        return False
+    
+
+    def _get_junction_path(self, start_waypoint, direction):
+        """
+        Ottiene il percorso pianificato attraverso l'incrocio.
+        
+        :param start_waypoint: waypoint di partenza
+        :param direction: direzione pianificata (RoadOption)
+        :return: lista di waypoint che attraversano l'incrocio
+        """
+        # Ottieni il percorso dal local planner
+        if hasattr(self._local_planner, 'get_waypoints_in_junction'):
+            return self._local_planner.get_waypoints_in_junction()
+        
+        # Se non è disponibile, genera un percorso semplice
+        waypoints = []
+        next_wp = start_waypoint
+        
+        # Cerca il primo waypoint dell'incrocio
+        while not next_wp.is_junction:
+            next_wps = next_wp.next(2.0)
+            if not next_wps:
+                return waypoints
+            next_wp = next_wps[0]
+        
+        # Aggiungi il primo waypoint dell'incrocio
+        junction_wp = next_wp
+        waypoints.append(junction_wp)
+        
+        # Attraversa l'incrocio nella direzione specificata
+        while junction_wp.is_junction:
+            # Ottieni tutti i waypoint successivi
+            next_options = junction_wp.next(2.0)
+            if not next_options:
+                break
+            
+            # Scegli il waypoint appropriato in base alla direzione
+            if direction == RoadOption.LEFT:
+                # Prendi il waypoint più a sinistra
+                next_options.sort(key=lambda wp: wp.transform.rotation.yaw)
+                junction_wp = next_options[0]  # Il più a sinistra
+            elif direction == RoadOption.RIGHT:
+                # Prendi il waypoint più a destra
+                next_options.sort(key=lambda wp: wp.transform.rotation.yaw, reverse=True)
+                junction_wp = next_options[0]  # Il più a destra
+            else:  # STRAIGHT
+                # Prendi il waypoint con la direzione più simile
+                current_yaw = junction_wp.transform.rotation.yaw
+                junction_wp = min(next_options, key=lambda wp: 
+                                abs((wp.transform.rotation.yaw - current_yaw + 180) % 360 - 180))
+            
+            waypoints.append(junction_wp)
+        
+        # Aggiungi alcuni waypoint dopo l'incrocio
+        for _ in range(3):
+            next_wps = junction_wp.next(2.0)
+            if not next_wps:
+                break
+            junction_wp = next_wps[0]
+            waypoints.append(junction_wp)
+        
+        return waypoints
 
     def _is_vehicle_turning_left(self, vehicle):
-        """Verifica se un veicolo sta attivando l'indicatore di svolta a sinistra."""
-        if not vehicle:
+        """
+        Verifica se un veicolo sta svoltando a sinistra.
+    
+        :param vehicle: il veicolo da controllare
+        :return: True se sta svoltando a sinistra, False altrimenti
+        """
+        # Ottieni la posizione attuale e la direzione del veicolo
+        vehicle_transform = vehicle.get_transform()
+        vehicle_location = vehicle_transform.location
+        vehicle_wp = self._map.get_waypoint(vehicle_location)
+    
+        # Ottieni il prossimo waypoint nella direzione di marcia
+        vehicle_forward = vehicle_transform.get_forward_vector()
+        next_wp = vehicle_wp.next(2.0)[0]  # Guarda avanti di 2 metri
+    
+        if not next_wp:
             return False
     
-        light_state = vehicle.get_light_state()
-        return bool(light_state & carla.libcarla.VehicleLightState.LeftBlinker)
+        # Calcola la differenza di heading tra il waypoint attuale e il prossimo
+        current_yaw = vehicle_wp.transform.rotation.yaw
+        next_yaw = next_wp.transform.rotation.yaw
+    
+        # Normalizza gli angoli
+        current_yaw = (current_yaw + 360) % 360
+        next_yaw = (next_yaw + 360) % 360
+    
+        # Calcola la differenza tra gli angoli (tenendo conto del wrap-around)
+        yaw_diff = (next_yaw - current_yaw + 180) % 360 - 180
+    
+        # Se la differenza è negativa, il veicolo sta girando a sinistra
+        return -45 > yaw_diff > -135
 
     def _is_vehicle_turning_right(self, vehicle):
-        """Verifica se un veicolo sta attivando l'indicatore di svolta a destra."""
-        if not vehicle:
+        """
+        Verifica se un veicolo sta svoltando a destra.
+    
+        :param vehicle: il veicolo da controllare
+        :return: True se sta svoltando a destra, False altrimenti
+        """
+        # Ottieni la posizione attuale e la direzione del veicolo
+        vehicle_transform = vehicle.get_transform()
+        vehicle_location = vehicle_transform.location
+        vehicle_wp = self._map.get_waypoint(vehicle_location)
+    
+        # Ottieni il prossimo waypoint nella direzione di marcia
+        vehicle_forward = vehicle_transform.get_forward_vector()
+        next_wp = vehicle_wp.next(2.0)[0]  # Guarda avanti di 2 metri
+    
+        if not next_wp:
             return False
     
-        light_state = vehicle.get_light_state()
-        return bool(light_state & carla.libcarla.VehicleLightState.RightBlinker)
+        # Calcola la differenza di heading tra il waypoint attuale e il prossimo
+        current_yaw = vehicle_wp.transform.rotation.yaw
+        next_yaw = next_wp.transform.rotation.yaw
+    
+        # Normalizza gli angoli
+        current_yaw = (current_yaw + 360) % 360
+        next_yaw = (next_yaw + 360) % 360
+    
+        # Calcola la differenza tra gli angoli (tenendo conto del wrap-around)
+        yaw_diff = (next_yaw - current_yaw + 180) % 360 - 180
+    
+        # Se la differenza è positiva, il veicolo sta girando a destra
+        return 45 < yaw_diff < 135
 
     def _is_vehicle_going_straight(self, vehicle):
-        """Verifica se un veicolo sta andando dritto (nessun indicatore attivo)."""
-        if not vehicle:
-            return False
+        """
+        Verifica se un veicolo sta procedendo dritto.
     
-        light_state = vehicle.get_light_state()
-        return not (bool(light_state & carla.libcarla.VehicleLightState.LeftBlinker) or 
-                   bool(light_state & carla.libcarla.VehicleLightState.RightBlinker))
+        :param vehicle: il veicolo da controllare
+        :return: True se sta procedendo dritto, False altrimenti
+        """
+        # Ottieni la posizione attuale e la direzione del veicolo
+        vehicle_transform = vehicle.get_transform()
+        vehicle_location = vehicle_transform.location
+        vehicle_wp = self._map.get_waypoint(vehicle_location)
+    
+        # Ottieni il prossimo waypoint nella direzione di marcia
+        vehicle_forward = vehicle_transform.get_forward_vector()
+        next_wp = vehicle_wp.next(2.0)[0]  # Guarda avanti di 2 metri
+    
+        if not next_wp:
+            return True  # Assumiamo che stia andando dritto se non c'è un next waypoint
+    
+        # Calcola la differenza di heading tra il waypoint attuale e il prossimo
+        current_yaw = vehicle_wp.transform.rotation.yaw
+        next_yaw = next_wp.transform.rotation.yaw
+    
+        # Normalizza gli angoli
+        current_yaw = (current_yaw + 360) % 360
+        next_yaw = (next_yaw + 360) % 360
+    
+        # Calcola la differenza tra gli angoli (tenendo conto del wrap-around)
+        yaw_diff = (next_yaw - current_yaw + 180) % 360 - 180
+    
+        # Se la differenza è piccola, il veicolo sta andando dritto
+        return abs(yaw_diff) < 20
     
     def set_streamer(self, streamer):
         """Imposta lo streamer per l'invio dei log al server Flask"""
         self.logger.set_streamer(streamer)
+
+    def _cleanup_stopped_vehicles_timer(self):
+        """Rimuove i timer dei veicoli che non sono più rilevanti"""
+        current_time = time.time()
+        
+        # Esegui la pulizia solo ogni tot secondi per evitare calcoli inutili
+        if current_time - self._last_timer_cleanup < self._timer_cleanup_interval:
+            return
+            
+        self._last_timer_cleanup = current_time
+        
+        # Rimuovi i timer più vecchi di X secondi (ad esempio 60 secondi)
+        expired_ids = []
+        for vehicle_id, timestamp in self._stopped_vehicles_timer.items():
+            if current_time - timestamp > 60.0:
+                expired_ids.append(vehicle_id)
+                
+        for vehicle_id in expired_ids:
+            del self._stopped_vehicles_timer[vehicle_id]
+            
+        self.logger.debug(f"Cleaned up {len(expired_ids)} expired vehicle timers")

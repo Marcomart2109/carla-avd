@@ -97,7 +97,7 @@ class OvertakingManeuver:
         overtake_time = self.get_overtake_time(ego_vehicle=self._vehicle, overtake_distance=self._overtake_ego_distance)
         
         # Calcola la distanza percorsa da un veicolo nella corsia opposta durante il sorpasso
-        opposite_vehicle_distance = overtake_time * speed_limit / 3.6
+        opposite_vehicle_distance = (overtake_time * speed_limit / 3.6) * 1.5
         
         search_distance = self._overtake_ego_distance + opposite_vehicle_distance
 
