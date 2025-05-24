@@ -174,7 +174,7 @@ class BehaviorAgent(BasicAgent):
         ##################################################
         # DA CONTROLLARE
         so_state, static_obstacle, so_distance = self._object_detector.detect_static_obstacles(ego_vehicle_wp)
-        cone_state, static_obstacle_cone, so_distance_cone = self._object_detector.detect_static_obstacles(ego_vehicle_wp,max_distance= 20, obj_filter="*static.prop.constructioncone*")
+        cone_state, static_obstacle_cone, _ = self._object_detector.detect_static_obstacles(ego_vehicle_wp,max_distance= 20, obj_filter="*static.prop.constructioncone*")
 
         if so_state:        
             distance = compute_distance_from_center(actor1 =self._vehicle, actor2 = static_obstacle, distance=so_distance)
@@ -189,7 +189,7 @@ class BehaviorAgent(BasicAgent):
                     distance_same_lane=1, 
                     distance_other_lane=20, 
                     distance_from_object=so_distance, 
-                    speed_limit=self._speed_limit
+                    speed_limit=self._behavior.max_speed
                 )
     
             # Check if the overtake path was generated and start the overtake
@@ -254,7 +254,7 @@ class BehaviorAgent(BasicAgent):
             diff_yaw = (bicycle_current_yaw - ego_current_yaw + 180) % 360 - 180
             
             # Definisci una soglia per considerare una bicicletta "allineata"
-            is_aligned_threshold = 20  # Gradi
+            is_aligned_threshold = 10  # Gradi
 
             # Controlla se i veicoli sono approssimativamente allineati
             if abs(diff_yaw) < is_aligned_threshold:                   
@@ -348,24 +348,13 @@ class BehaviorAgent(BasicAgent):
 
         # Periodo di grazia dopo l'uscita dall'incrocio (2 secondi)
         current_time = time.time()
-
-        # Rileva l'ingresso e l'uscita dall'incrocio
-        
-        # Gestione della velocità in base allo stato dell'incrocio
-
-        # if self._in_junction_state or (current_time - self._junction_exit_time < junction_grace_period):
-        #     # Siamo nell'incrociante o nel periodo di grazia: usa approach_speed
-
-        #     self.logger.web_debug("JUNCTION", f"Velocità mantenuta a {self._approach_speed} km/h nell'incrocio")
-        #     self.set_target_speed(self._approach_speed)
-        #     return self._local_planner.run_step()
             
         #############################################
         ######## Vehicle Avoidance Behaviors ########
         #############################################
         vehicle_state, vehicle, distance = self._object_detector.detect_vehicles(
             ego_vehicle_wp, 
-            max_distance=30, 
+            max_distance=20, 
             lane_offset=0 if self._direction == RoadOption.LANEFOLLOW else 
                          (-1 if self._direction == RoadOption.CHANGELANELEFT else 1),
             angle_th=30 if self._direction == RoadOption.LANEFOLLOW else 180
@@ -384,12 +373,18 @@ class BehaviorAgent(BasicAgent):
                 self.logger.web_debug("VEHICLE", f"VEICOLO DAVANTI, MI FERMO!")
                 self.logger.critical(f"Emergency stop due to vehicle proximity")
                 return self.emergency_stop()
-            elif distance < self._behavior.min_proximity_threshold*2 and not is_abandoned:
-                self.logger.web_debug("VEHICLE", f"VEICOLO DAVANTI, RALLENTO!")
-                target_speed = self._approach_speed
-                self._local_planner.set_speed(target_speed)
+            elif distance < self._behavior.min_proximity_threshold*2 and not is_abandoned and get_speed(vehicle) < 1:
+                self.logger.web_debug("VEHICLE", f"VEICOLO DAVANTI, RALLENTO!") 
+                self._local_planner.set_speed(self._approach_speed)
+                self._local_planner.run_step(debug=debug)
 
             if is_abandoned:
+
+                if distance < self._behavior.min_proximity_threshold*2 and distance > self._behavior.braking_distance:
+                    self.logger.web_debug("VEHICLE", f"VEICOLO DAVANTI, RALLENTO PER VEICOLO ABBANDONATO!")
+                    self._local_planner.set_speed(self._approach_speed)
+                    return self._local_planner.run_step(debug=debug)
+                
                 # If the vehicle is considered parked/abandoned, we can try to overtake it.
                 self.logger.debug(f"Vehicle {vehicle} is parked/abandoned, attempting to overtake.")
                 
@@ -483,9 +478,8 @@ class BehaviorAgent(BasicAgent):
                 self.logger.web_debug("VEHICLE FOLLOWING", f"Vehicle following")
                 control = self.car_following_manager(vehicle, distance, debug=debug)
         
-            return control
-        
-            ##############################################
+
+        ##############################################
         ################ STOP SIGN ###################
         ##############################################
         stop_sign_state, stop_sign, stop_sign_distance = self.stop_sign_manager(self._vehicle)
@@ -519,7 +513,7 @@ class BehaviorAgent(BasicAgent):
                     return self.emergency_stop()
             
             # Se non siamo in attesa ma siamo vicini a uno stop non ancora rispettato
-            elif distance < 3 and stop_sign.id not in self._stop_sign_respected:
+            elif distance < 4 and stop_sign.id not in self._stop_sign_respected:
                 self.logger.both_action("STOP_SIGN", "Fermata allo stop")
                 self._stop_sign_waiting = True
                 self._stop_sign_wait_time = time.time()
@@ -529,8 +523,8 @@ class BehaviorAgent(BasicAgent):
             # Se rilevo il segnale in lontananza, inizio a rallentare gradualmente
             elif distance < self._behavior.braking_distance * 2.5 and stop_sign.id not in self._stop_sign_respected:
 
-                self.logger.web_debug("STOP_SIGN", f"Rallentamento anticipato per il segnale di stop {stop_sign.id}, distanza: {distance:.1f}m, velocità target: {target_speed:.1f} km/h")
-                self.logger.info(f"Approaching stop sign at {distance:.1f}m, slowing down to {target_speed:.1f} km/h")
+                self.logger.web_debug("STOP_SIGN", f"Rallentamento anticipato per il segnale di stop {stop_sign.id}, distanza: {distance:.1f}m, velocità target: {self._approach_speed:.1f} km/h")
+                self.logger.info(f"Approaching stop sign at {distance:.1f}m, slowing down to {self._approach_speed:.1f} km/h")
                 self.set_target_speed(self._approach_speed)
 
             return self._local_planner.run_step(debug=debug)
@@ -550,24 +544,9 @@ class BehaviorAgent(BasicAgent):
                 return self._local_planner.run_step()
             else:
                 # Se non stiamo girando, manteniamo la velocità normale
-                target_speed = self._approach_speed * 2
-                self._local_planner.set_speed(target_speed)
+                self._local_planner.set_speed(20)
                 self.logger.web_debug("JUNCTION", f"Non sto girando, mantengo la velocità a {target_speed:.2f} km/h")
                 return self._local_planner.run_step()
-
-        # Nuova parte: controllo continuo durante l'attraversamento dell'incrocio
-        # elif ego_vehicle_wp.is_junction and self._in_junction_state:
-        #     # Controlla continuamente se è ancora sicuro attraversare
-        #     can_cross = self.junction_manager(ego_vehicle_wp)
-        #     if not can_cross:
-        #         self.logger.web_action("JUNCTION", "Condizioni cambiate, non è più sicuro proseguire nell'incrocio")
-        #         return self.emergency_stop()
-            
-        #     # Se è ancora sicuro, continua con velocità ridotta
-        #     self.set_target_speed(self._approach_speed)
-        #     self.logger.web_debug("JUNCTION", f"Attraversamento dell'incrocio in corso, velocità mantenuta a {self._approach_speed} km/h")
-        #     return self._local_planner.run_step()
-            
 
         elif not ego_vehicle_wp.is_junction and self._in_junction_state:
             # Uscita dall'incrocio
@@ -588,12 +567,11 @@ class BehaviorAgent(BasicAgent):
                     self._behavior.max_speed,
                     self._speed_limit - self._behavior.speed_lim_dist])
                 self._local_planner.set_speed(target_speed)
-                self.logger.web_action("JUNCTION", f"Periodo di grazia terminato, velocità ripristinata a {target_speed:.2f} km/h")
+                self.logger.web_action("JUNCTION", f"Incrocio superato, velocità ripristinata a {target_speed:.2f} km/h")
             else:
                 # Ancora nel periodo di grazia, mantieni la velocità ridotta
                 self.set_target_speed(self._approach_speed)
                 remaining_time = self._junction_grace_duration - (current_time - self._junction_exit_time)
-                self.logger.web_debug("JUNCTION", f"Periodo di grazia: rimangono {remaining_time:.1f} secondi")
     
             return self._local_planner.run_step()
 

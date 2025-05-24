@@ -103,13 +103,15 @@ class OvertakingManeuver:
         relevant_vehicles.sort(key=lambda v: dist(actor, v))
         
         # Considera solo i veicoli in una catena continua (senza gap troppo grandi)
-        max_gap = 8.0  # metri - gap massimo per considerare i veicoli in sequenza
+        max_gap = 12.0  # metri - gap massimo per considerare i veicoli in sequenza
         previous_vehicle = actor
         continuous_chain_distance = 0
         
         for v in relevant_vehicles:
-            vehicle_distance = dist(previous_vehicle, v)
-            
+            if is_within_distance(target_transform=v.get_transform(), reference_transform=previous_vehicle.get_transform(), max_distance=max_distance, angle_interval=[0, 60]):
+                vehicle_distance = compute_distance_from_center(actor1=previous_vehicle, actor2=v, distance=dist(v, previous_vehicle))
+            else:
+                continue
             # Se il gap è troppo grande, interrompi la catena
             if vehicle_distance > max_gap:
                 break
@@ -118,11 +120,11 @@ class OvertakingManeuver:
             continuous_chain_distance += vehicle_distance + v.bounding_box.extent.x
             previous_vehicle = v
         
-        # La distanza finale è la lunghezza dell'attore principale + catena continua + buffer
-        final_distance = actor_length + continuous_chain_distance + safety_buffer
+        # La distanza finale è la lunghezza dell'attore principale + catena continua (removed buffer for now)
+        final_distance = actor_length + continuous_chain_distance
         
         # Limita la distanza massima per evitare sorpassi eccessivamente lunghi
-        max_overtake_distance = 25.0  # metri massimi sulla corsia opposta
+        max_overtake_distance = 35.0  # metri massimi sulla corsia opposta
         
         return min(final_distance, max_overtake_distance)
 
@@ -186,8 +188,8 @@ class OvertakingManeuver:
         overtake_time = self.get_overtake_time(ego_vehicle=self._vehicle, overtake_distance=self._overtake_ego_distance)
         
         # Calcola la distanza percorsa da un veicolo nella corsia opposta durante il sorpasso
-        opposite_vehicle_distance = (overtake_time * speed_limit / 3.6) * 1.1
-        search_distance = self._overtake_ego_distance + opposite_vehicle_distance
+        opposite_vehicle_distance = (overtake_time * speed_limit / 3.6)
+        search_distance = max(self._overtake_ego_distance + opposite_vehicle_distance,30.0)
 
         # Controlla se c'è un veicolo nella corsia opposta che può ostacolare il sorpasso
         opposing_vehicle = self._opposite_vehicle(ego_wp=ego_vehicle_wp, search_distance=search_distance)
@@ -356,7 +358,7 @@ class OvertakingManeuver:
         v0 = get_speed(ego_vehicle) / 3.6  # m/s
     
         # Accelerazione del veicolo
-        a = 3.5  # m/s^2
+        a = 3.1 # m/s^2
         
         # Calcola il tempo di sorpasso
         overtake_time = (-v0 + math.sqrt(v0 ** 2 + 2 * a * overtake_distance)) / a

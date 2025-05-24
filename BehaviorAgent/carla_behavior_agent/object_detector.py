@@ -33,7 +33,7 @@ class ObjectDetector:
         # Detect vehicles in front of us
         vehicle_state, vehicle, distance = self._vehicle_obstacle_detected(
             vehicle_list, 
-            max(self._behavior.min_proximity_threshold, self._behavior.max_speed / 3),
+            max_distance,
             up_angle_th=angle_th,
             lane_offset=lane_offset
         )
