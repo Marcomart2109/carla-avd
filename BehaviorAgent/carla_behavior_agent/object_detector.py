@@ -33,11 +33,10 @@ class ObjectDetector:
         # Detect vehicles in front of us
         vehicle_state, vehicle, distance = self._vehicle_obstacle_detected(
             vehicle_list, 
-            max_distance,
+            max(self._behavior.min_proximity_threshold, self._behavior.max_speed / 3),
             up_angle_th=angle_th,
             lane_offset=lane_offset
         )
-        
         return vehicle_state, vehicle, distance
     
     def detect_pedestrians(self, direction, max_distance=12):
@@ -89,7 +88,7 @@ class ObjectDetector:
         return True, bicycle_list[0], dist(bicycle_list[0], waypoint)
 
     def detect_static_obstacles(self, waypoint, max_distance=40, obj_filter="*static.prop*", 
-                              obj_ignore=["static.prop.dirtdebris01","static.prop.dirtdebris02","static.prop.dirtdebris03"]):
+                              obj_ignore=["static.prop.dirtdebris01","static.prop.dirtdebris02","static.prop.dirtdebris03","static.prop.mesh"]):
         """Detects static obstacles around the ego vehicle."""
         props = self.world.get_actors().filter(obj_filter)
         props = [p for p in props if is_within_distance(p.get_transform(), self.vehicle.get_transform(), 
@@ -106,7 +105,7 @@ class ObjectDetector:
             return True, props[0], dist(props[0], waypoint) 
         # Use the vehicle detection logic for static obstacles
         o_state, o, o_distance = self._vehicle_obstacle_detected(
-            props, max(self._behavior.min_proximity_threshold, self._behavior.max_speed / 2), up_angle_th=60
+            props, max(self._behavior.min_proximity_threshold, self._behavior.max_speed / 3), up_angle_th=60
         )
         
         return o_state, o, o_distance

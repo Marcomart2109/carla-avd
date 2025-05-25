@@ -7,7 +7,7 @@ import carla
 import math
 from basic_agent import BasicAgent
 from local_planner import RoadOption
-from behavior_types import Cautious, Aggressive, Normal
+from behavior_types import Cautious, Defensive, Aggressive, Normal
 from misc import *
 import time
 from BehaviorAgent.carla_behavior_agent.object_detector import ObjectDetector
@@ -27,7 +27,7 @@ class BehaviorAgent(BasicAgent):
     are encoded in the agent, from cautious to a more aggressive ones.
     """
 
-    def __init__(self, vehicle, behavior='normal', opt_dict={}, map_inst=None, grp_inst=None):
+    def __init__(self, vehicle, behavior='defensive', opt_dict={}, map_inst=None, grp_inst=None):
         """
         Constructor method.  
 
@@ -58,6 +58,9 @@ class BehaviorAgent(BasicAgent):
 
         elif behavior == 'aggressive':
             self._behavior = Aggressive()
+        
+        elif behavior == 'defensive':
+            self._behavior = Defensive()
             
         # Inizializza il gestore di sorpasso
         self._overtake_manager = OvertakingManeuver(
@@ -116,7 +119,7 @@ class BehaviorAgent(BasicAgent):
             :return control: carla.VehicleControl
         """
         if not self.initialized:
-            self.logger.web_debug("BehaviorAgent", f"Initializing Behavior Agent set to: {self._behavior}")
+            self.logger.web_debug("BehaviorAgent", f"Initializing Behavior Agent!")
             self.initialized = True
 
         # Update the information regarding the ego vehicle
@@ -140,7 +143,7 @@ class BehaviorAgent(BasicAgent):
         # and if it is red
         if self.traffic_light_manager():
             # TODO: Add a behaviour for more than one traffic light
-            self.logger.web_info("TRAFFIC_LIGHT", "Red light detected", "ACTION")
+            self.logger.web_info("TRAFFIC_LIGHT", "Red light detected")
             return self.emergency_stop()
 
 
@@ -159,11 +162,11 @@ class BehaviorAgent(BasicAgent):
             
             # Brake moment
             if distance <= 3:
-                self.logger.web_debug("PEDESTRIAN", f"MI FERMO PER IL PEDONE")
+                self.logger.web_action("Pedestrian", f"Pedone {walker.id} molto vicino, mi fermo!")
                 return self.emergency_stop()
 
             else:
-                self.logger.web_debug("PEDESTRIAN", f"HO VISTO UN PEDONE, RALLENTO!")
+                self.logger.web_action("Pedestrian", f"Pedone {walker.id} rilevato a {distance:.2f}m, rallento per sicurezza")
                 self.set_target_speed(self._approach_speed)
                 return self._local_planner.run_step()
 
@@ -221,12 +224,12 @@ class BehaviorAgent(BasicAgent):
                 self._lateral_offset_type = 'cone'
             else:
                 self._local_planner.set_lateral_offset(.1 * static_obstacle_cone.bounding_box.extent.y + self._vehicle.bounding_box.extent.y)
-                self.logger.web_debug("STATIC_OBSTACLE", f"Static obstacle {static_obstacle_cone} detected in a different lane")
+                self.logger.web_action("STATIC_OBSTACLE", f"Ostacolo rilevato nella corsia oppsota: {static_obstacle_cone.type_id} applico un offset laterale")
                 self._lateral_offset_active = True
                 self._lateral_offset_type = 'cone'
 
         elif self._lateral_offset_active and not cone_state and self._lateral_offset_type == 'cone':
-            self.logger.web_debug("STATIC_OBSTACLE", "No static obstacle detected, resetting cone lateral offset")
+            self.logger.web_action("STATIC_OBSTACLE", "Resetto l'offset laterale")
             self._local_planner.set_lateral_offset(0.0)
             self._lateral_offset_active = False
             self._lateral_offset_type = None
@@ -255,9 +258,11 @@ class BehaviorAgent(BasicAgent):
             
             # Definisci una soglia per considerare una bicicletta "allineata"
             is_aligned_threshold = 10  # Gradi
+            is_potentially_crossing = abs(diff_yaw) > is_aligned_threshold and abs(abs(diff_yaw) - 180) > is_aligned_threshold 
+
 
             # Controlla se i veicoli sono approssimativamente allineati
-            if abs(diff_yaw) < is_aligned_threshold:                   
+            if abs(diff_yaw) < is_aligned_threshold:    
                 # Controlla se la bicicletta è nella STESSA corsia del veicolo ego
                 if ego_lane_id == bicycle_lane_id:
                     self.logger.info("Bicycle {bicycle.id} detected in the SAME lane ({ego_lane_id}), aligned. Distance: {b_distance:.2f}m.")
@@ -281,7 +286,7 @@ class BehaviorAgent(BasicAgent):
                     else: 
                         self.logger.info(f"Bicycle {bicycle.id} is in our lane, but not centered. Applying lateral offset.")
                         new_offset = -(2.5 * bicycle.bounding_box.extent.y + self._vehicle.bounding_box.extent.y)
-                        self.logger.web_action("BICYCLE", f"Applying lateral offset of {new_offset:.2f}m to avoid bicycle {bicycle.id}")
+                        self.logger.web_action("BICYCLE", f"Applico un offeset di: {new_offset:.2f}m per evitare la bicicletta: {bicycle.id}")
                         
                         # Solo se non c'è un offset per coni attivo
                         if self._lateral_offset_type != 'cone':
@@ -294,6 +299,7 @@ class BehaviorAgent(BasicAgent):
                             self._speed_limit - self._behavior.speed_lim_dist])
                         self._local_planner.set_speed(target_speed)
                         control = self._local_planner.run_step(debug=debug)
+                        
                 else: # La bicicletta è allineata (stessa direzione) ma in una corsia DIVERSA
                     self.logger.info(f"Bicycle {bicycle.id} detected in a different lane (Ego: {ego_lane_id}, Bicycle: {bicycle_lane_id}), aligned. No offset applied.")
                     # Reset solo se non ci sono coni e l'offset era attivo per le biciclette
@@ -303,11 +309,8 @@ class BehaviorAgent(BasicAgent):
                         self._lateral_offset_active = False
             
             # CASO: Bicicletta NON allineata
-            else:
-                self.logger.info(f"Bicycle {bicycle.id} detected in a different lane (Ego: {ego_lane_id}, Bicycle: {bicycle_lane_id}), NOT aligned. Distance: {b_distance:.2f}m.")
-                is_potentially_crossing = abs(diff_yaw) > is_aligned_threshold and abs(abs(diff_yaw) - 180) > is_aligned_threshold 
-
-                if is_potentially_crossing and b_distance < self._behavior.braking_distance * 2.5:
+            elif is_potentially_crossing:
+                if b_distance < self._behavior.braking_distance * 2.5:
                     self.logger.warning(f"Bicycle {bicycle.id} is potentially CROSSING at {b_distance:.2f}m. Initiating emergency stop or significant slowdown.")
                     if b_distance < self._behavior.braking_distance:
                         self.logger.critical(f"Bicycle {bicycle.id} CRITICAL proximity while crossing. EMERGENCY STOP.")
@@ -327,16 +330,15 @@ class BehaviorAgent(BasicAgent):
                 else:
                     self.logger.info(f"Bicycle {bicycle.id} is NOT aligned, but not an immediate crossing threat. Maintaining cautious speed.")
 
+            else:
+                self.logger.web_debug("BICYCLE", "Following the Bicycle")
+                control = self.car_following_manager(bicycle, b_distance, debug=debug)
+
         # Reset del lateral offset solo se non ci sono né coni né biciclette rilevanti
         elif self._lateral_offset_active and not cone_state:
             self.logger.info(f"No bicycle or cone detected, resetting lateral offset.")
             self._local_planner.set_lateral_offset(0.0)
             self._lateral_offset_active = False
-                
-
-        
-    
-
     
         # Se stiamo per entrare in un incrocio o siamo già in uno
         # Gestione della velocità negli incroci
@@ -370,21 +372,11 @@ class BehaviorAgent(BasicAgent):
 
             # Emergency brake if the car is very close.
             if distance < self._behavior.braking_distance and not is_abandoned:
-                self.logger.web_debug("VEHICLE", f"VEICOLO DAVANTI, MI FERMO!")
+                self.logger.web_action("Vehicle", f"Veicolo davanti rilevato, mi fermo!")
                 self.logger.critical(f"Emergency stop due to vehicle proximity")
                 return self.emergency_stop()
-            elif distance < self._behavior.min_proximity_threshold*2 and not is_abandoned and get_speed(vehicle) < 1:
-                self.logger.web_debug("VEHICLE", f"VEICOLO DAVANTI, RALLENTO!") 
-                self._local_planner.set_speed(self._approach_speed)
-                self._local_planner.run_step(debug=debug)
 
             if is_abandoned:
-
-                if distance < self._behavior.min_proximity_threshold*2 and distance > self._behavior.braking_distance:
-                    self.logger.web_debug("VEHICLE", f"VEICOLO DAVANTI, RALLENTO PER VEICOLO ABBANDONATO!")
-                    self._local_planner.set_speed(self._approach_speed)
-                    return self._local_planner.run_step(debug=debug)
-                
                 # If the vehicle is considered parked/abandoned, we can try to overtake it.
                 self.logger.debug(f"Vehicle {vehicle} is parked/abandoned, attempting to overtake.")
                 
@@ -426,16 +418,16 @@ class BehaviorAgent(BasicAgent):
                         )
                         
                     if overtake_path: 
-                        self.logger.both_action("OVERTAKE", f" Sorpasso possibile, avvio sorpasso")
+                        self.logger.both_action("Overtake", f" Sorpasso possibile, avvio sorpasso")
                         self._overtake_manager.update_overtake_plan(overtake_path=overtake_path)
                         overtake_path_generated_this_step = True
                     else:
                         # Failed to find an overtake path, stop.
-                        self.logger.both_warning("OVERTAKE", "IL VEICOLO E' DAVVERO FERMO, CERCO UN PERCORSO DI SORPASSO")
+                        self.logger.both_info("Overtake", "Il veicolo davanti è fermo da un po', cerco un percorso di sorpasso!")
                         return self.emergency_stop()
 
                 if self._overtake_manager.in_overtake:  
-                    self.logger.web_debug("OVERTAKE", "SORPASSO IN CORSO")                 
+                    self.logger.web_info("Overtake", "Sorpasso in corso!")                 
                     current_actual_speed_limit = self._vehicle.get_speed_limit()
                     
                     effective_max_speed = self._behavior.max_speed
@@ -474,12 +466,13 @@ class BehaviorAgent(BasicAgent):
             
             else: # Vehicle is not abandoned
                 # If the vehicle is not parked, we can follow it
-                self.logger.debug(f"[DEBUG - Vehicle Avoidance] Vehicle {vehicle} is not parked, following.")
-                self.logger.web_debug("VEHICLE FOLLOWING", f"Vehicle following")
+                self.logger.debug(f"Vehicle {vehicle} is not parked, following.")
+                self.logger.web_info("Vehicle", "Seguo il veicolo davanti")
                 control = self.car_following_manager(vehicle, distance, debug=debug)
         
-
-        ##############################################
+            return control
+        
+            ##############################################
         ################ STOP SIGN ###################
         ##############################################
         stop_sign_state, stop_sign, stop_sign_distance = self.stop_sign_manager(self._vehicle)
@@ -492,7 +485,6 @@ class BehaviorAgent(BasicAgent):
             if self._stop_sign_waiting:
                 # Calcola quanto tempo abbiamo aspettato
                 wait_time = time.time() - self._stop_sign_wait_time
-                self.logger.web_debug("STOP_SIGN", f"Attesa allo stop: {wait_time:.1f}s / {self._min_stop_time}s")
                 
                 # Se abbiamo aspettato abbastanza
                 if wait_time >= self._min_stop_time:
@@ -514,7 +506,7 @@ class BehaviorAgent(BasicAgent):
             
             # Se non siamo in attesa ma siamo vicini a uno stop non ancora rispettato
             elif distance < 4 and stop_sign.id not in self._stop_sign_respected:
-                self.logger.both_action("STOP_SIGN", "Fermata allo stop")
+                self.logger.both_action("Stop Sign", "Segnale di stop rilevato, mi fermo")
                 self._stop_sign_waiting = True
                 self._stop_sign_wait_time = time.time()
                 return self.emergency_stop()
@@ -522,8 +514,6 @@ class BehaviorAgent(BasicAgent):
             # NUOVO: Fase di rallentamento anticipato
             # Se rilevo il segnale in lontananza, inizio a rallentare gradualmente
             elif distance < self._behavior.braking_distance * 2.5 and stop_sign.id not in self._stop_sign_respected:
-
-                self.logger.web_debug("STOP_SIGN", f"Rallentamento anticipato per il segnale di stop {stop_sign.id}, distanza: {distance:.1f}m, velocità target: {self._approach_speed:.1f} km/h")
                 self.logger.info(f"Approaching stop sign at {distance:.1f}m, slowing down to {self._approach_speed:.1f} km/h")
                 self.set_target_speed(self._approach_speed)
 
@@ -533,20 +523,22 @@ class BehaviorAgent(BasicAgent):
             # Prima di entrare nell'incrocio, verifica se è sicuro attraversarlo
             can_cross = self.junction_manager(ego_vehicle_wp)
             if not can_cross:
-                self.logger.web_action("JUNCTION", "Non è sicuro attraversare l'incrocio, mi fermo")
+                self.logger.web_action("Junction", "Non è sicuro attraversare l'incrocio, mi fermo")
                 return self.emergency_stop()
             
             # Se è sicuro, procedi con il comportamento normale
             if (self._incoming_direction in [RoadOption.LEFT, RoadOption.RIGHT]) or (self._direction in [RoadOption.LEFT, RoadOption.RIGHT]):
                 self._in_junction_state = True
                 self.set_target_speed(self._approach_speed)  
-                self.logger.web_action("JUNCTION", f"Ingresso nell'incrocio, velocità ridotta a {self._approach_speed} km/h")
+                self.logger.web_action("Junction", f"Ingresso nell'incrocio, velocità ridotta a {self._approach_speed} km/h")
                 return self._local_planner.run_step()
             else:
                 # Se non stiamo girando, manteniamo la velocità normale
-                self._local_planner.set_speed(20)
-                self.logger.web_debug("JUNCTION", f"Non sto girando, mantengo la velocità a {target_speed:.2f} km/h")
+                target_speed = 20
+                self._local_planner.set_speed(target_speed)
+                self.logger.web_action("Junction", f"Incrocio dritto, mantengo la velocità a {target_speed:.2f} km/h")
                 return self._local_planner.run_step()
+            
 
         elif not ego_vehicle_wp.is_junction and self._in_junction_state:
             # Uscita dall'incrocio
@@ -554,7 +546,7 @@ class BehaviorAgent(BasicAgent):
             self._in_junction_grace_period = True  # Inizia il periodo di grazia
             self._junction_exit_time = current_time
             self.set_target_speed(self._approach_speed)
-            self.logger.web_debug("JUNCTION", f"Uscita dall'incrocio, mantengo velocità ridotta a {self._approach_speed} km/h per periodo di grazia di {self._junction_grace_duration} secondi")
+            self.logger.web_debug("JUNCTION", f"Uscita dall'incrocio, mantengo velocità ridotta a {self._approach_speed} km/h")
             return self._local_planner.run_step()
 
         # Aggiungi un nuovo caso per gestire il periodo di grazia
@@ -567,7 +559,7 @@ class BehaviorAgent(BasicAgent):
                     self._behavior.max_speed,
                     self._speed_limit - self._behavior.speed_lim_dist])
                 self._local_planner.set_speed(target_speed)
-                self.logger.web_action("JUNCTION", f"Incrocio superato, velocità ripristinata a {target_speed:.2f} km/h")
+                self.logger.web_info("JUNCTION", f"Uscendo da un incrocio, velocità ripristinata a {target_speed:.2f} km/h")
             else:
                 # Ancora nel periodo di grazia, mantieni la velocità ridotta
                 self.set_target_speed(self._approach_speed)
@@ -787,12 +779,6 @@ class BehaviorAgent(BasicAgent):
         
         # Verifica se possiamo attraversare in sicurezza
         can_cross = self._check_junction_rules(vehicles, planned_direction)
-        
-        # Log della decisione
-        if can_cross:
-            self.logger.web_action("JUNCTION", f"Attraversamento sicuro dell'incrocio (direzione: {planned_direction})")
-        else:
-            self.logger.web_debug("JUNCTION", f"Attesa all'incrocio (direzione: {planned_direction})")
     
         return can_cross
 
@@ -875,7 +861,7 @@ class BehaviorAgent(BasicAgent):
     
         # Aggiungi questi log di debug alla fine del metodo
         self.logger.debug(f"Veicoli categorizzati all'incrocio: sinistra:{len(vehicles['left'])}, destra:{len(vehicles['right'])}, frontali:{len(vehicles['front'])}")
-        self.logger.web_debug("JUNCTION", f"Veicoli all'incrocio - sinistra:{len(vehicles['left'])}, destra:{len(vehicles['right'])}, fronte:{len(vehicles['front'])}")
+        #self.logger.web_debug("JUNCTION", f"Veicoli all'incrocio - sinistra:{len(vehicles['left'])}, destra:{len(vehicles['right'])}, fronte:{len(vehicles['front'])}")
         
         return vehicles
 
@@ -892,7 +878,7 @@ class BehaviorAgent(BasicAgent):
         filtered_vehicles = self._filter_relevant_vehicles(vehicles, planned_direction)
         
         # Log dei veicoli rilevanti dopo il filtraggio
-        self.logger.web_debug("JUNCTION", f"Veicoli rilevanti dopo filtraggio - sinistra:{len(filtered_vehicles['left'])}, "
+        self.logger.info(f"Veicoli rilevanti dopo filtraggio - sinistra:{len(filtered_vehicles['left'])}, "
                                         f"destra:{len(filtered_vehicles['right'])}, fronte:{len(filtered_vehicles['front'])}")
         
         # Ottieni il primo veicolo in ogni direzione (più vicino)
@@ -914,7 +900,7 @@ class BehaviorAgent(BasicAgent):
             front_is_safe = vehicle_front is None or not self._is_vehicle_turning_left(vehicle_front)
         
             result = left_is_safe and right_is_safe and front_is_safe
-            self.logger.web_debug("JUNCTION", f"Direzione DRITTO - Sicurezza: sinistra:{left_is_safe}, destra:{right_is_safe}, fronte:{front_is_safe}")
+            #self.logger.web_debug("JUNCTION", f"Direzione DRITTO - Sicurezza: sinistra:{left_is_safe}, destra:{right_is_safe}, fronte:{front_is_safe}")
             return result
 
         # Logica per SVOLTA A SINISTRA
@@ -971,7 +957,7 @@ class BehaviorAgent(BasicAgent):
             if vehicle_speed < 0.5:  # quasi fermo (0.5 m/s ≈ 1.8 km/h)
                 # Verifica se è sulla nostra stessa strada/corsia
                 if not self._is_on_same_lane(vehicle_waypoint, planned_path):
-                    self.logger.web_debug("JUNCTION", f"Veicolo {vehicle.id} ignorato: fermo e non sulla nostra traiettoria")
+                    #self.logger.web_debug("JUNCTION", f"Veicolo {vehicle.id} ignorato: fermo e non sulla nostra traiettoria")
                     return False
             
             # Per veicoli in movimento, verifica potenziale intersezione con la nostra traiettoria
