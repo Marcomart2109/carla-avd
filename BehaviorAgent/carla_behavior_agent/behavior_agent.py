@@ -35,6 +35,8 @@ class BehaviorAgent(BasicAgent):
             :param behavior: type of agent to apply
         """
 
+        self.x = True
+
         super().__init__(vehicle, opt_dict=opt_dict, map_inst=map_inst, grp_inst=grp_inst)
         self._look_ahead_steps = 0
 
@@ -121,7 +123,8 @@ class BehaviorAgent(BasicAgent):
         if not self.initialized:
             self.logger.web_debug("BehaviorAgent", f"Initializing Behavior Agent!")
             self.initialized = True
-
+        
+        self.logger.info(f"Direction: {self._direction}, Incoming Direction: {self._incoming_direction}, Speed Limit: {self._speed_limit:.2f} km/h, Speed: {self._speed:.2f} km/h")
         # Update the information regarding the ego vehicle
         self._update_information()
 
@@ -161,7 +164,7 @@ class BehaviorAgent(BasicAgent):
             self.logger.debug(f"Pedestrian {walker} detected, distance: {distance}")
             
             # Brake moment
-            if distance <= 3:
+            if distance <= 3.5:
                 self.logger.web_action("Pedestrian", f"Pedone {walker.id} molto vicino, mi fermo!")
                 return self.emergency_stop()
 
@@ -217,12 +220,7 @@ class BehaviorAgent(BasicAgent):
         if cone_state and not self._overtake_manager.in_overtake:
             o_loc = static_obstacle_cone.get_location()
             o_wp = self._map.get_waypoint(o_loc)
-            if o_wp.lane_id == ego_vehicle_wp.lane_id:
-                self._local_planner.set_lateral_offset(-2 * static_obstacle_cone.bounding_box.extent.y - self._vehicle.bounding_box.extent.y)
-                self.logger.web_debug("STATIC_OBSTACLE", f"Static obstacle {static_obstacle_cone} detected in the same lane, applying lateral offset")
-                self._lateral_offset_active = True
-                self._lateral_offset_type = 'cone'
-            else:
+            if o_wp.lane_id != ego_vehicle_wp.lane_id:
                 self._local_planner.set_lateral_offset(.1 * static_obstacle_cone.bounding_box.extent.y + self._vehicle.bounding_box.extent.y)
                 self.logger.web_action("STATIC_OBSTACLE", f"Ostacolo rilevato nella corsia oppsota: {static_obstacle_cone.type_id} applico un offset laterale")
                 self._lateral_offset_active = True
@@ -256,13 +254,51 @@ class BehaviorAgent(BasicAgent):
             # Calcola la differenza di yaw, normalizzandola tra -180 e 180
             diff_yaw = (bicycle_current_yaw - ego_current_yaw + 180) % 360 - 180
             
-            # Definisci una soglia per considerare una bicicletta "allineata"
-            is_aligned_threshold = 10  # Gradi
-            is_potentially_crossing = abs(diff_yaw) > is_aligned_threshold and abs(abs(diff_yaw) - 180) > is_aligned_threshold 
+            is_aligned_threshold = 10  # soglia per considerare i veicoli allineati            
 
+            # Distingui tra curva e attraversamento
+            is_ego_in_curve = self._is_vehicle_in_curve(ego_vehicle_wp)
+            is_bicycle_crossing = self._is_bicycle_crossing_path(bicycle, ego_vehicle_wp)
+            
+            # Una bicicletta è "potentially crossing" solo se:
+            # 1. Non è allineata E
+            # 2. NON siamo in curva E 
+            # 3. La bicicletta sta effettivamente attraversando il nostro percorso
+            is_potentially_crossing = (abs(diff_yaw) > is_aligned_threshold and 
+                                     abs(abs(diff_yaw) - 180) > is_aligned_threshold and
+                                     not is_ego_in_curve and
+                                     is_bicycle_crossing)
 
-            # Controlla se i veicoli sono approssimativamente allineati
-            if abs(diff_yaw) < is_aligned_threshold:    
+            # [CASO 1] Bicicletta non allineata ma siamo in curva - segui la bicicletta
+            if is_ego_in_curve:
+                self.logger.both_info("BICYCLE", "Bicycle detected while in curve, following behavior")
+                control = self.car_following_manager(bicycle, b_distance, debug=debug)
+            
+            # [CASO 2] Non siamo in curva e la bicicletta sta attraversando
+            elif is_potentially_crossing:
+                    self.logger.warning(f"Bicycle {bicycle.id} is potentially crossing our path")
+
+                    if b_distance < self._behavior.braking_distance * 2.5:
+                        self.logger.warning(f"Bicycle {bicycle.id} is potentially CROSSING at {b_distance:.2f}m. Initiating emergency stop or significant slowdown.")
+                        if b_distance < self._behavior.braking_distance:
+                            self.logger.critical(f"Bicycle {bicycle.id} CRITICAL proximity while crossing. EMERGENCY STOP.")
+                            return self.emergency_stop()
+                        else:
+                            target_speed = min(self._approach_speed / 2, get_speed(self._vehicle) / 2)
+                            target_speed = max(target_speed, 0)
+                            self.set_target_speed(target_speed)
+                            self.logger.info(f"Bicycle {bicycle.id} is crossing. Slowing down to {target_speed:.1f} km/h.")
+                            control = self._local_planner.run_step(debug=debug)
+
+                    elif get_speed(bicycle) < 1 and b_distance < self._behavior.braking_distance * 2:
+                        self.logger.info(f"Bicycle {bicycle.id} is NOT aligned, slow/stopped, and close. Decelerating to approach speed.")
+                        self.set_target_speed(self._approach_speed)
+                        control = self._local_planner.run_step(debug=debug)
+                    else:
+                        self.logger.info(f"Bicycle {bicycle.id} is crossing but not an immediate threat. Maintaining cautious speed.")
+            
+            # [CASO 3] Bicicletta allineata (stessa direzione)
+            elif abs(diff_yaw) < is_aligned_threshold:    
                 # Controlla se la bicicletta è nella STESSA corsia del veicolo ego
                 if ego_lane_id == bicycle_lane_id:
                     self.logger.info("Bicycle {bicycle.id} detected in the SAME lane ({ego_lane_id}), aligned. Distance: {b_distance:.2f}m.")
@@ -308,35 +344,18 @@ class BehaviorAgent(BasicAgent):
                         self._local_planner.set_lateral_offset(0.0)
                         self._lateral_offset_active = False
             
-            # CASO: Bicicletta NON allineata
-            elif is_potentially_crossing:
-                if b_distance < self._behavior.braking_distance * 2.5:
-                    self.logger.warning(f"Bicycle {bicycle.id} is potentially CROSSING at {b_distance:.2f}m. Initiating emergency stop or significant slowdown.")
-                    if b_distance < self._behavior.braking_distance:
-                        self.logger.critical(f"Bicycle {bicycle.id} CRITICAL proximity while crossing. EMERGENCY STOP.")
-                        return self.emergency_stop()
-                    else:
-                        target_speed = min(self._approach_speed / 2, get_speed(self._vehicle) / 2)
-                        target_speed = max(target_speed, 0)
-                        self.set_target_speed(target_speed)
-                        self.logger.info(f"Bicycle {bicycle.id} is crossing. Slowing down to {target_speed:.1f} km/h.")
-                        control = self._local_planner.run_step(debug=debug)
-
-                elif get_speed(bicycle) < 1 and b_distance < self._behavior.braking_distance * 2:
-                    self.logger.info(f"Bicycle {bicycle.id} is NOT aligned, slow/stopped, and close. Decelerating to approach speed.")
-                    self.set_target_speed(self._approach_speed)
-                    control = self._local_planner.run_step(debug=debug)
-                
-                else:
-                    self.logger.info(f"Bicycle {bicycle.id} is NOT aligned, but not an immediate crossing threat. Maintaining cautious speed.")
-
+            # [CASO 4] Default - seguire la bicicletta
             else:
-                self.logger.web_debug("BICYCLE", "Following the Bicycle")
+                self.logger.web_debug("BICYCLE", f"Default case: Following the bicycle (diff_yaw: {diff_yaw:.1f}°)")
                 control = self.car_following_manager(bicycle, b_distance, debug=debug)
+            
+            # Se abbiamo ottenuto un controllo dalla gestione della bicicletta, lo restituiamo
+            if control is not None:
+                return control
 
         # Reset del lateral offset solo se non ci sono né coni né biciclette rilevanti
         elif self._lateral_offset_active and not cone_state:
-            self.logger.info(f"No bicycle or cone detected, resetting lateral offset.")
+            self.logger.both_action("Bicycle", "Resetto l'offset laterale.")
             self._local_planner.set_lateral_offset(0.0)
             self._lateral_offset_active = False
     
@@ -348,7 +367,6 @@ class BehaviorAgent(BasicAgent):
             self._in_junction_state = False
             self._junction_exit_time = 0
 
-        # Periodo di grazia dopo l'uscita dall'incrocio (2 secondi)
         current_time = time.time()
             
         #############################################
@@ -362,9 +380,10 @@ class BehaviorAgent(BasicAgent):
             angle_th=30 if self._direction == RoadOption.LANEFOLLOW else 180
         )
 
-        if vehicle_state:
+        if vehicle_state and not self._overtake_manager.in_overtake:
             # Distance is computed from the center of the two cars,
             # we use bounding boxes to calculate the actual distance
+            
             distance = compute_distance_from_center(actor1=self._vehicle, actor2=vehicle, distance=distance)
             
             # Check if the car is legitimately stopped
@@ -372,7 +391,7 @@ class BehaviorAgent(BasicAgent):
 
             # Emergency brake if the car is very close.
             if distance < self._behavior.braking_distance and not is_abandoned:
-                self.logger.web_action("Vehicle", f"Veicolo davanti rilevato, mi fermo!")
+                self.logger.web_action("Vehicle", f"Veicolo davanti rilevato:{vehicle}, mi fermo!")
                 self.logger.critical(f"Emergency stop due to vehicle proximity")
                 return self.emergency_stop()
 
@@ -517,7 +536,7 @@ class BehaviorAgent(BasicAgent):
                 self.logger.info(f"Approaching stop sign at {distance:.1f}m, slowing down to {self._approach_speed:.1f} km/h")
                 self.set_target_speed(self._approach_speed)
 
-            return self._local_planner.run_step(debug=debug)
+            #return self._local_planner.run_step(debug=debug)
 
         if (self._incoming_waypoint.is_junction or ego_vehicle_wp.is_junction):
             # Prima di entrare nell'incrocio, verifica se è sicuro attraversarlo
@@ -531,13 +550,15 @@ class BehaviorAgent(BasicAgent):
                 self._in_junction_state = True
                 self.set_target_speed(self._approach_speed)  
                 self.logger.web_action("Junction", f"Ingresso nell'incrocio, velocità ridotta a {self._approach_speed} km/h")
-                return self._local_planner.run_step()
+                #return self._local_planner.run_step()
+                control = self._local_planner.run_step(debug=debug)
             else:
                 # Se non stiamo girando, manteniamo la velocità normale
                 target_speed = 20
                 self._local_planner.set_speed(target_speed)
                 self.logger.web_action("Junction", f"Incrocio dritto, mantengo la velocità a {target_speed:.2f} km/h")
-                return self._local_planner.run_step()
+                #return self._local_planner.run_step()
+                control = self._local_planner.run_step(debug=debug)
             
 
         elif not ego_vehicle_wp.is_junction and self._in_junction_state:
@@ -547,7 +568,8 @@ class BehaviorAgent(BasicAgent):
             self._junction_exit_time = current_time
             self.set_target_speed(self._approach_speed)
             self.logger.web_debug("JUNCTION", f"Uscita dall'incrocio, mantengo velocità ridotta a {self._approach_speed} km/h")
-            return self._local_planner.run_step()
+            #return self._local_planner.run_step()
+            control = self._local_planner.run_step(debug=debug)
 
         # Aggiungi un nuovo caso per gestire il periodo di grazia
         elif self._in_junction_grace_period:
@@ -563,9 +585,8 @@ class BehaviorAgent(BasicAgent):
             else:
                 # Ancora nel periodo di grazia, mantieni la velocità ridotta
                 self.set_target_speed(self._approach_speed)
-                remaining_time = self._junction_grace_duration - (current_time - self._junction_exit_time)
-    
-            return self._local_planner.run_step()
+            #return self._local_planner.run_step()
+            control = self._local_planner.run_step(debug=debug)
 
         # 4: Normal behavior
         else:
@@ -619,7 +640,7 @@ class BehaviorAgent(BasicAgent):
         # Decrease the overtake counter if the agent is in the middle of an overtake maneuver.
         if self._overtake_manager.overtake_cnt > 0:
             self._overtake_manager.overtake_cnt -= 1
-            self._local_planner.draw_waypoints(color=carla.Color(0, 255, 0))
+            self._local_planner.draw_waypoints(color=carla.Color(255, 0, 0))
         else: 
             self._overtake_manager.in_overtake = False
 
@@ -632,7 +653,7 @@ class BehaviorAgent(BasicAgent):
         affected, _ = self._affected_by_traffic_light(self._vehicle, lights_list)
 
         if affected:
-            self.logger.web_warning("TRAFFIC_LIGHT", "Red light detected")
+            self.logger.web_info("Traffic Light", "Red light detected")
             
         return affected
     
@@ -646,50 +667,8 @@ class BehaviorAgent(BasicAgent):
         """
         affected, signal = self._affected_by_sign(vehicle=vehicle, sign_type="206", max_distance=sign_distance)
         distance = -1 if not affected else dist(a=vehicle, b=signal)
-        
-        # Se il segnale è stato rispettato di recente, lo notifichiamo ma non ci fermiamo
-        if affected and signal and signal.id in self._stop_sign_respected:
-            last_respect_time = self._stop_sign_respected[signal.id]
-            if time.time() - last_respect_time < 30.0:  # 30 secondi di "immunità" dopo aver rispettato lo stop
-                self.logger.debug(f"Stop sign {signal.id} già rispettato recentemente")
     
         return affected, signal, distance
-
-    def _tailgating(self, waypoint, vehicle_list):
-        """
-        This method is in charge of tailgating behaviors.
-
-            :param location: current location of the agent
-            :param waypoint: current waypoint of the agent
-            :param vehicle_list: list of all the nearby vehicles
-        """
-
-        left_turn = waypoint.left_lane_marking.lane_change
-        right_turn = waypoint.right_lane_marking.lane_change
-
-        left_wpt = waypoint.get_left_lane()
-        right_wpt = waypoint.get_right_lane()
-
-        behind_vehicle_state, behind_vehicle, _ = self._vehicle_obstacle_detected(vehicle_list, max(
-            self._behavior.min_proximity_threshold, self._speed_limit / 2), up_angle_th=180, low_angle_th=160)
-        if behind_vehicle_state and self._speed < get_speed(behind_vehicle):
-            if (right_turn == carla.LaneChange.Right or right_turn ==
-                    carla.LaneChange.Both) and waypoint.lane_id * right_wpt.lane_id > 0 and right_wpt.lane_type == carla.LaneType.Driving:
-                new_vehicle_state, _, _ = self._vehicle_obstacle_detected(vehicle_list, max(
-                    self._behavior.min_proximity_threshold, self._speed_limit / 2), up_angle_th=180, lane_offset=1)
-                if not new_vehicle_state:
-                    end_waypoint = self._local_planner.target_waypoint
-                    self._behavior.tailgate_counter = 200
-                    self.set_destination(end_waypoint.transform.location,
-                                         right_wpt.transform.location)
-            elif left_turn == carla.LaneChange.Left and waypoint.lane_id * left_wpt.lane_id > 0 and left_wpt.lane_type == carla.LaneType.Driving:
-                new_vehicle_state, _, _ = self._vehicle_obstacle_detected(vehicle_list, max(
-                    self._behavior.min_proximity_threshold, self._speed_limit / 2), up_angle_th=180, lane_offset=-1)
-                if not new_vehicle_state:
-                    end_waypoint = self._local_planner.target_waypoint
-                    self._behavior.tailgate_counter = 200
-                    self.set_destination(end_waypoint.transform.location,
-                                         left_wpt.transform.location)
 
     def car_following_manager(self, vehicle, distance, debug=False):
         """
@@ -913,7 +892,7 @@ class BehaviorAgent(BasicAgent):
                                                         self._is_vehicle_turning_left(vehicle_right))
         
             result = front_is_safe and right_is_safe
-            self.logger.web_debug("JUNCTION", f"Direzione SINISTRA - Sicurezza: fronte:{front_is_safe}, destra:{right_is_safe}")
+            self.logger.web_info("Junction", f"Direzione SINISTRA - Sicurezza: fronte:{front_is_safe}, destra:{right_is_safe}")
             return result
 
         # Logica per SVOLTA A DESTRA
@@ -924,7 +903,7 @@ class BehaviorAgent(BasicAgent):
             left_is_safe = vehicle_left is None or not self._is_vehicle_going_straight(vehicle_left)
         
             result = front_is_safe and left_is_safe
-            self.logger.web_debug("JUNCTION", f"Direzione DESTRA - Sicurezza: fronte:{front_is_safe}, sinistra:{left_is_safe}")
+            self.logger.web_info("Junction", f"Direzione DESTRA - Sicurezza: fronte:{front_is_safe}, sinistra:{left_is_safe}")
             return result
 
         # Per altre situazioni, sii cauto
@@ -1214,3 +1193,127 @@ class BehaviorAgent(BasicAgent):
             del self._stopped_vehicles_timer[vehicle_id]
             
         self.logger.debug(f"Cleaned up {len(expired_ids)} expired vehicle timers")
+
+    ############
+    ## Metodi per la gestione delle biciclette e curve
+    ############
+
+    def _is_vehicle_in_curve(self, waypoint):
+        """
+        Determina se il veicolo è attualmente in una curva analizzando 
+        i waypoint futuri per rilevare cambiamenti di direzione.
+        
+        :param waypoint: waypoint attuale del veicolo
+        :return: True se in curva, False altrimenti
+        """
+        try:
+            # Analizza i prossimi waypoint per rilevare cambiamenti di direzione
+            current_wp = waypoint
+            yaw_changes = []
+            
+            # Controlla i prossimi 5 waypoint (circa 10 metri avanti)
+            for i in range(5):
+                next_wps = current_wp.next(2.0)
+                if not next_wps:
+                    break
+                    
+                next_wp = next_wps[0]
+                
+                # Calcola la differenza di yaw
+                current_yaw = current_wp.transform.rotation.yaw
+                next_yaw = next_wp.transform.rotation.yaw
+                
+                # Normalizza la differenza di yaw
+                yaw_diff = (next_yaw - current_yaw + 180) % 360 - 180
+                yaw_changes.append(abs(yaw_diff))
+                
+                current_wp = next_wp
+            
+            # Se la media dei cambiamenti di yaw supera una soglia, siamo in curva
+            if yaw_changes:
+                avg_yaw_change = sum(yaw_changes) / len(yaw_changes)
+                curve_threshold = 8.0  # Gradi - puoi regolare questo valore
+                return avg_yaw_change > curve_threshold
+                
+        except Exception as e:
+            self.logger.error(f"Error detecting curve: {e}")
+            
+        return False
+
+    def _is_bicycle_crossing_path(self, bicycle, ego_waypoint):
+        """
+        Determina se una bicicletta sta effettivamente attraversando il percorso
+        del veicolo ego, piuttosto che semplicemente seguendo una strada parallela.
+        
+        :param bicycle: l'attore bicicletta
+        :param ego_waypoint: waypoint attuale del veicolo ego
+        :return: True se la bicicletta sta attraversando, False altrimenti
+        """
+        try:
+            bicycle_location = bicycle.get_location()
+            bicycle_wp = self._map.get_waypoint(bicycle_location)
+            
+            # Ottieni la velocità e direzione della bicicletta
+            bicycle_velocity = bicycle.get_velocity()
+            bicycle_speed = math.sqrt(bicycle_velocity.x**2 + bicycle_velocity.y**2)
+            
+            # Se la bicicletta è ferma, non sta attraversando
+            if bicycle_speed < 0.5:  # meno di 0.5 m/s
+                return False
+            
+            # Calcola la direzione di movimento della bicicletta
+            bicycle_direction = math.atan2(bicycle_velocity.y, bicycle_velocity.x)
+            bicycle_direction_deg = math.degrees(bicycle_direction)
+            
+            # Ottieni la direzione della strada del veicolo ego
+            ego_road_direction = ego_waypoint.transform.rotation.yaw
+            
+            # Calcola l'angolo tra la direzione della bicicletta e la strada
+            angle_diff = abs((bicycle_direction_deg - ego_road_direction + 180) % 360 - 180)
+            
+            # Proietta il movimento della bicicletta per vedere se interseca il nostro percorso
+            bicycle_future_location = carla.Location(
+                bicycle_location.x + bicycle_velocity.x * 2.0,  # 2 secondi nel futuro
+                bicycle_location.y + bicycle_velocity.y * 2.0,
+                bicycle_location.z
+            )
+            
+            # Controlla se la proiezione futura interseca la nostra corsia
+            future_distance_to_ego_lane = self._distance_to_lane(bicycle_future_location, ego_waypoint)
+            current_distance_to_ego_lane = self._distance_to_lane(bicycle_location, ego_waypoint)
+            
+            # La bicicletta sta attraversando se:
+            # 1. L'angolo con la strada è significativo (non parallela)
+            # 2. Si sta avvicinando alla nostra corsia
+            is_perpendicular = 60 < angle_diff < 120  # Movimento quasi perpendicolare alla strada
+            is_approaching_lane = future_distance_to_ego_lane < current_distance_to_ego_lane
+            
+            return is_perpendicular and is_approaching_lane
+            
+        except Exception as e:
+            self.logger.error(f"Error detecting bicycle crossing: {e}")
+            return True  # In caso di errore, sii cauto e considera che stia attraversando
+
+    def _distance_to_lane(self, location, reference_waypoint):
+        """
+        Calcola la distanza da una posizione alla corsia di riferimento.
+        
+        :param location: posizione da controllare
+        :param reference_waypoint: waypoint di riferimento della corsia
+        :return: distanza alla corsia
+        """
+        try:
+            # Trova il waypoint più vicino alla posizione data
+            closest_wp = self._map.get_waypoint(location, project_to_road=True)
+            
+            # Se è sulla stessa strada e corsia, la distanza è 0
+            if (closest_wp.road_id == reference_waypoint.road_id and 
+                closest_wp.lane_id == reference_waypoint.lane_id):
+                return 0.0
+            
+            # Altrimenti calcola la distanza euclidea
+            return location.distance(closest_wp.transform.location)
+            
+        except Exception as e:
+            self.logger.error(f"Error calculating distance to lane: {e}")
+            return float('inf')  # Restituisci una distanza molto grande in caso di errore

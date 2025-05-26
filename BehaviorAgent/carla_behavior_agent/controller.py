@@ -50,7 +50,8 @@ class VehicleController():
         self._world = self._vehicle.get_world()
         self.past_steering = self._vehicle.get_control().steer
         self._lon_controller = PIDLongitudinalController(self._vehicle, **args_longitudinal)
-        self._lat_controller = StanleyLateralController(self._vehicle, offset, **args_lateral)
+        #self._lat_controller = StanleyLateralController(self._vehicle, offset, **args_lateral)
+        self._lat_controller = PIDLateralController(self._vehicle, offset, **args_lateral)
 
 
     def run_step(self, target_speed, waypoint):
@@ -65,7 +66,7 @@ class VehicleController():
         """
 
         acceleration = self._lon_controller.run_step(target_speed)
-        current_steering = self._lat_controller.run_step()
+        current_steering = self._lat_controller.run_step(waypoint)
         control = carla.VehicleControl()
         if acceleration >= 0.0:
             control.throttle = min(acceleration, self.max_throt)
@@ -312,7 +313,7 @@ class StanleyLateralController():
         return self._offset
     
     @offset.setter
-    def offset(self, offset : int):
+    def offset(self, offset):
         '''
         Set the offset of the vehicle from the center of the lane.
         '''
@@ -407,3 +408,17 @@ class PIDLateralController():
         self._k_i = K_I
         self._k_d = K_D
         self._dt = dt
+    
+    @property
+    def offset(self):
+        '''
+        Get the offset of the vehicle from the center of the lane.
+        '''
+        return self._offset
+    
+    @offset.setter
+    def offset(self, offset):
+        '''
+        Set the offset of the vehicle from the center of the lane.
+        '''
+        self._offset = offset

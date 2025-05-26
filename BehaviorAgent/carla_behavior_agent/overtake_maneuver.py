@@ -69,7 +69,7 @@ class OvertakingManeuver:
         :return: distanza da percorrere sulla corsia adiacente
         """
         # Ottieni la lunghezza del veicolo da sorpassare
-        actor_length = actor.bounding_box.extent.x
+        actor_length = actor.bounding_box.extent.x * 2
         
         # Distanza di sicurezza minima dopo il sorpasso
         safety_buffer = 5.0  # metri
@@ -86,7 +86,7 @@ class OvertakingManeuver:
             if v.id != actor.id and v.id != self._vehicle.id and dist(v, actor) < max_distance \
             and self._map.get_waypoint(v.get_location()).lane_id == actor_wp.lane_id
         ]
-        
+
         # Filtra solo i veicoli effettivamente fermi e davanti all'attore principale
         relevant_vehicles = []
         for v in vehicle_list:
@@ -108,20 +108,21 @@ class OvertakingManeuver:
         continuous_chain_distance = 0
         
         for v in relevant_vehicles:
+            
             if is_within_distance(target_transform=v.get_transform(), reference_transform=previous_vehicle.get_transform(), max_distance=max_distance, angle_interval=[0, 60]):
                 vehicle_distance = compute_distance_from_center(actor1=previous_vehicle, actor2=v, distance=dist(v, previous_vehicle))
             else:
                 continue
             # Se il gap è troppo grande, interrompi la catena
-            if vehicle_distance > max_gap:
-                break
+            # if vehicle_distance > max_gap:
+            #     break
                 
             # Aggiungi la distanza del veicolo alla catena
-            continuous_chain_distance += vehicle_distance + v.bounding_box.extent.x
+            continuous_chain_distance += vehicle_distance + (v.bounding_box.extent.x * 2)
             previous_vehicle = v
         
         # La distanza finale è la lunghezza dell'attore principale + catena continua (removed buffer for now)
-        final_distance = actor_length + continuous_chain_distance
+        final_distance = actor_length + continuous_chain_distance + safety_buffer
         
         # Limita la distanza massima per evitare sorpassi eccessivamente lunghi
         max_overtake_distance = 35.0  # metri massimi sulla corsia opposta
@@ -173,7 +174,7 @@ class OvertakingManeuver:
         """
         # Ottieni la distanza sull'altra corsia se non è fornita
         if not distance_other_lane:
-            distance_other_lane = self._get_distance_other_lane(object_to_overtake, 25)  # Ridotto da 30 a 25
+            distance_other_lane = self._get_distance_other_lane(object_to_overtake, 30)  # Ridotto da 30 a 25
 
         # Ottieni la lunghezza totale del veicolo
         vehicle_length = self._vehicle.bounding_box.extent.x 
@@ -225,7 +226,7 @@ class OvertakingManeuver:
             not self._overtake_cnt and 
             not collision and 
             not wp_in_junction and
-            self._overtake_ego_distance < 50.0  # Limite massimo di distanza per il sorpasso
+            self._overtake_ego_distance < 70.0  # Limite massimo di distanza per il sorpasso
         )
                         
         if safe_to_overtake:
@@ -332,11 +333,11 @@ class OvertakingManeuver:
         # Calcola l'ipotenusa per il cambio di corsia (più realistica)
         # Usa un angolo di cambio corsia più graduale
         lane_change_angle_distance = 8.0  # metri per cambiare corsia gradualmente
-        hypotenuse = math.sqrt(lane_change_angle_distance**2 + lane_width**2)
+        hypotenuse = math.sqrt(vehicle_length**2 + lane_width**2)
         
         # Calcola la distanza totale con parametri più conservativi
         overtake_distance = (
-            distance_from_obstacle * 0.8 +  # Riduci la distanza iniziale
+            distance_from_obstacle +  # Riduci la distanza iniziale
             distance_same_lane + 
             hypotenuse + 
             distance_other_lane + 

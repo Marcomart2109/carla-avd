@@ -20,8 +20,8 @@ class Defensive(object):
     speed_lim_dist = 4
     speed_decrease = 10
     safety_time = 3
-    min_proximity_threshold = 12
-    braking_distance = 6
+    min_proximity_threshold = 10
+    braking_distance = 5
     tailgate_counter = 0
 
 

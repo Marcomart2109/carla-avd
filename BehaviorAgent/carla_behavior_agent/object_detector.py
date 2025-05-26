@@ -31,18 +31,27 @@ class ObjectDetector:
             return False, None, -1
             
         # Detect vehicles in front of us
-        vehicle_state, vehicle, distance = self._vehicle_obstacle_detected(
+        vehicle_state, vehicle, distance = self.vehicle_obstacle_detected(
             vehicle_list, 
             max(self._behavior.min_proximity_threshold, self._behavior.max_speed / 3),
             up_angle_th=angle_th,
             lane_offset=lane_offset
         )
+
+        direction = self._local_planner.target_road_option
+        speed = get_speed(self.vehicle)
+        # Check for tailgating
+        if not vehicle_state and direction == RoadOption.LANEFOLLOW \
+                and not waypoint.is_junction and speed > 10 \
+                and self._behavior.tailgate_counter == 0:
+            self._tailgating(waypoint, vehicle_list)
+
         return vehicle_state, vehicle, distance
     
     def detect_pedestrians(self, direction, max_distance=12):
         """Detects pedestrians around the ego vehicle."""
         walker_list = self.world.get_actors().filter("*walker.pedestrian*")
-        max_distance = 10 if self.map.get_waypoint(self.vehicle.get_location()).is_junction else 30
+        max_distance = 15 if self.map.get_waypoint(self.vehicle.get_location()).is_junction else 30
 
         
         walker_list = [w for w in walker_list if 
@@ -59,14 +68,14 @@ class ObjectDetector:
         
 
         if direction == RoadOption.CHANGELANELEFT:
-            walker_state, walker, distance = self._vehicle_obstacle_detected(walker_list, max(
+            walker_state, walker, distance = self.pedestrian_obstacle_detected(walker_list, max(
                 self._behavior.min_proximity_threshold, speed_limit / 2), up_angle_th=90, lane_offset=-1)
         elif direction == RoadOption.CHANGELANERIGHT:
-            walker_state, walker, distance = self._vehicle_obstacle_detected(walker_list, max(
+            walker_state, walker, distance = self.pedestrian_obstacle_detected(walker_list, max(
                 self._behavior.min_proximity_threshold, speed_limit / 2), up_angle_th=90, lane_offset=1)
         else:
-            walker_state, walker, distance = self._vehicle_obstacle_detected(walker_list, max(
-                self._behavior.min_proximity_threshold, speed_limit / 3), up_angle_th=60)
+            walker_state, walker, distance = self.pedestrian_obstacle_detected(walker_list, max(
+                self._behavior.min_proximity_threshold, speed_limit / 2), up_angle_th=180)
         
         return walker_state, walker, distance
     
@@ -104,13 +113,116 @@ class ObjectDetector:
         if obj_filter == "*static.prop.constructioncone*" and len(props) > 0:
             return True, props[0], dist(props[0], waypoint) 
         # Use the vehicle detection logic for static obstacles
-        o_state, o, o_distance = self._vehicle_obstacle_detected(
+        o_state, o, o_distance = self.vehicle_obstacle_detected(
             props, max(self._behavior.min_proximity_threshold, self._behavior.max_speed / 3), up_angle_th=60
         )
         
         return o_state, o, o_distance
-        
-    def _vehicle_obstacle_detected(self, vehicle_list, max_distance, up_angle_th=90, low_angle_th=0, lane_offset=0):
+    
+    def pedestrian_obstacle_detected(self, pedestrian_list, max_distance=None, up_angle_th=90, low_angle_th=-90, lane_offset=1):
+        """
+        Method to check if there is a vehicle in front of the agent blocking its path.
+
+            :param vehicle_list (list of carla.Vehicle): list contatining vehicle objects.
+                If None, all vehicle in the scene are used
+            :param max_distance: max freespace to check for obstacles.
+                If None, the base threshold value is used
+        """
+        if self._ignore_vehicles:
+            return (False, None, -1)
+
+        if not max_distance:
+            max_distance = self._base_vehicle_threshold
+
+        ego_transform = self.vehicle.get_transform()
+        ego_wpt = self.map.get_waypoint(self.vehicle.get_location())
+
+        # Get the right offset
+        if ego_wpt.lane_id < 0 and lane_offset != 0:
+            lane_offset *= -1
+
+        # Get the transform of the front of the ego
+        ego_forward_vector = ego_transform.get_forward_vector()
+        ego_extent = self.vehicle.bounding_box.extent.x
+        ego_front_transform = ego_transform
+        ego_front_transform.location += carla.Location(
+            x=ego_extent * ego_forward_vector.x,
+            y=ego_extent * ego_forward_vector.y,
+        )
+
+        for pedestrian in pedestrian_list:
+            target_transform = pedestrian.get_transform()
+            target_wpt = self.map.get_waypoint(target_transform.location, lane_type=carla.LaneType.Any)
+
+            # Simplified version for outside junctions
+            if not ego_wpt.is_junction or not target_wpt.is_junction:
+
+                if target_wpt.road_id != ego_wpt.road_id or target_wpt.lane_id != ego_wpt.lane_id  + lane_offset:
+                    next_wpt = self._local_planner.get_incoming_waypoint_and_direction(steps=3)[0]
+                    if not next_wpt:
+                        continue
+                    if target_wpt.road_id != next_wpt.road_id or target_wpt.lane_id != next_wpt.lane_id  + lane_offset:
+                        continue
+
+                target_forward_vector = target_transform.get_forward_vector()
+                target_extent = pedestrian.bounding_box.extent.x
+                target_rear_transform = target_transform
+                target_rear_transform.location -= carla.Location(
+                    x=target_extent * target_forward_vector.x,
+                    y=target_extent * target_forward_vector.y,
+                )
+
+                if is_within_distance(target_rear_transform, ego_front_transform, max_distance, [low_angle_th, up_angle_th]):
+                    return (True, pedestrian, compute_distance(target_transform.location, ego_transform.location))
+
+            # Waypoints aren't reliable, check the proximity of the vehicle to the route
+            else:
+                print("ENTROOOOO : 2")
+                route_bb = []
+                ego_location = ego_transform.location
+                extent_y = self.vehicle.bounding_box.extent.y
+                r_vec = ego_transform.get_right_vector()
+                p1 = ego_location + carla.Location(extent_y * r_vec.x, extent_y * r_vec.y)
+                p2 = ego_location + carla.Location(-extent_y * r_vec.x, -extent_y * r_vec.y)
+                route_bb.append([p1.x, p1.y, p1.z])
+                route_bb.append([p2.x, p2.y, p2.z])
+
+                for wp, _ in self._local_planner.get_plan():
+                    if ego_location.distance(wp.transform.location) > max_distance:
+                        break
+
+                    r_vec = wp.transform.get_right_vector()
+                    p1 = wp.transform.location + carla.Location(extent_y * r_vec.x, extent_y * r_vec.y)
+                    p2 = wp.transform.location + carla.Location(-extent_y * r_vec.x, -extent_y * r_vec.y)
+                    route_bb.append([p1.x, p1.y, p1.z])
+                    route_bb.append([p2.x, p2.y, p2.z])
+
+                if len(route_bb) < 3:
+                    # 2 points don't create a polygon, nothing to check
+                    return (False, None, -1)
+                ego_polygon = Polygon(route_bb)
+
+                # Compare the two polygons
+                for pedestrian in pedestrian_list:
+                    target_extent = pedestrian.bounding_box.extent.x
+                    if pedestrian.id == self.vehicle.id:
+                        continue
+                    if ego_location.distance(pedestrian.get_location()) > max_distance:
+                        continue
+
+                    target_bb = pedestrian.bounding_box
+                    target_vertices = target_bb.get_world_vertices(pedestrian.get_transform())
+                    target_list = [[v.x, v.y, v.z] for v in target_vertices]
+                    target_polygon = Polygon(target_list)
+
+                    if ego_polygon.intersects(target_polygon):
+                        return (True, pedestrian, compute_distance(pedestrian.get_location(), ego_location))
+
+                return (False, None, -1)
+
+        return (False, None, -1)
+    
+    def vehicle_obstacle_detected(self, vehicle_list=None, max_distance=None, up_angle_th=90, low_angle_th=0, lane_offset=0):
         """
         Method to check if there is a vehicle in front of the agent blocking its path.
 
@@ -123,7 +235,7 @@ class ObjectDetector:
             return (False, None, -1)
 
         if not vehicle_list:
-            vehicle_list = self._world.get_actors().filter("*vehicle*")
+            vehicle_list = self.world.get_actors().filter("*vehicle*")
 
         if not max_distance:
             max_distance = self._base_vehicle_threshold
@@ -217,4 +329,44 @@ class ObjectDetector:
         d_angle = math.degrees(math.acos(forward_vector.x * target_vector.x + forward_vector.y * target_vector.y))
         
         return d_angle > 90, d_angle
+    
+    def _tailgating(self, waypoint, vehicle_list):
+            """
+            This method is in charge of tailgating behaviors.
 
+                :param location: current location of the agent
+                :param waypoint: current waypoint of the agent
+                :param vehicle_list: list of all the nearby vehicles
+            """
+
+            left_turn = waypoint.left_lane_marking.lane_change
+            right_turn = waypoint.right_lane_marking.lane_change
+
+            left_wpt = waypoint.get_left_lane()
+            right_wpt = waypoint.get_right_lane()
+
+            speed = get_speed(self.vehicle)
+            speed_limit = self.vehicle.get_speed_limit()
+
+            behind_vehicle_state, behind_vehicle, _ = self.vehicle_obstacle_detected(vehicle_list, max(
+                self._behavior.min_proximity_threshold, speed_limit / 2), up_angle_th=180, low_angle_th=160)
+            if behind_vehicle_state and speed < get_speed(behind_vehicle):
+                if (right_turn == carla.LaneChange.Right or right_turn ==
+                        carla.LaneChange.Both) and waypoint.lane_id * right_wpt.lane_id > 0 and right_wpt.lane_type == carla.LaneType.Driving:
+                    new_vehicle_state, _, _ = self.vehicle_obstacle_detected(vehicle_list, max(
+                        self._behavior.min_proximity_threshold, speed_limit / 2), up_angle_th=180, lane_offset=1)
+                    if not new_vehicle_state:
+                        print("Tailgating, moving to the right!")
+                        end_waypoint = self._local_planner.target_waypoint
+                        self._behavior.tailgate_counter = 200
+                        self.set_destination(end_waypoint.transform.location,
+                                            right_wpt.transform.location)
+                elif left_turn == carla.LaneChange.Left and waypoint.lane_id * left_wpt.lane_id > 0 and left_wpt.lane_type == carla.LaneType.Driving:
+                    new_vehicle_state, _, _ = self.self.vehicle_obstacle_detected(vehicle_list, max(
+                        self._behavior.min_proximity_threshold, speed_limit / 2), up_angle_th=180, lane_offset=-1)
+                    if not new_vehicle_state:
+                        print("Tailgating, moving to the left!")
+                        end_waypoint = self._local_planner.target_waypoint
+                        self._behavior.tailgate_counter = 200
+                        self.set_destination(end_waypoint.transform.location,
+                                            left_wpt.transform.location)

@@ -495,50 +495,58 @@ class BasicAgent(object):
     
     def is_vehicle_legitimately_stopped(self, vehicle: carla.Vehicle) -> tuple:
         '''
-        This method determines if a vehicle is stopped for a legitimate traffic reason or if it's
-        parked/abandoned and therefore can be overtaken.
+        Determina se un veicolo è fermo per una ragione legittima o se è parcheggiato/abbandonato.
         
-        :param vehicle: The vehicle to evaluate
-        
-        :return: A tuple containing:
-            - vehicle_wp (carla.Waypoint): waypoint of the evaluated vehicle
-            - is_abandoned (bool): True if the vehicle is considered parked/abandoned (and therefore overtakable),
-            False if the vehicle is stopped for a legitimate traffic reason
+        :param vehicle: Il veicolo da valutare (quello davanti all'agente)
+        :return: (vehicle_wp, is_abandoned) - waypoint del veicolo e se è considerato abbandonato
         '''
         vehicle_loc = vehicle.get_location()
         vehicle_wp = self._map.get_waypoint(vehicle_loc)
-
-        # Get nearby traffic lights relevant to the 'vehicle' being checked
+        
+        # Controlli esistenti per semafori e segnali di stop
         lights_list_for_vehicle = self._world.get_actors().filter("*traffic_light*")
         lights_list_for_vehicle = [
             l for l in lights_list_for_vehicle 
             if is_within_distance(l.get_transform(), vehicle.get_transform(), 50, angle_interval=[0, 90])
         ]
-
-        # Check if the 'vehicle' (not self._vehicle) is affected by a stop sign or by a traffic light
-        # Pass 'vehicle' and its relevant 'lights_list_for_vehicle'
-        affected_by_traffic_light, _ = self._affected_by_traffic_light(vehicle, lights_list_for_vehicle) 
-        affected_by_stop_sign, _ = self._affected_by_sign(vehicle) # Pass 'vehicle'
-
-        # Simplified logic: A vehicle is considered parked/abandoned if:
-        # - It's practically stopped (speed < 0.1 km/h)
-        # - It's not affected by a stop sign (pertaining to 'vehicle')
-        # - It's not affected by a traffic light (pertaining to 'vehicle')
-        # - It's not in a junction (unless it's stopped for a light/sign at the junction, covered above)
-        # The check for 'not lights_list_for_vehicle' might be too strict if a green light is present.
-        # The primary check is 'not affected_by_traffic_light' (which implies red light).
-
-        if get_speed(vehicle) < 0.1 and \
-        not affected_by_stop_sign and \
-        not affected_by_traffic_light and \
-        not vehicle_wp.is_junction:
-            # Further check: if it's not in a junction but stopped, and no red light or stop sign,
-            # it's likely abandoned. If it IS in a junction, it must be clear of lights/signs.
-            return vehicle_wp, True  # It's parked/abandoned
         
-        # If the vehicle is moving, or stopped for a traffic light/sign, or stopped in a junction
-        # (and not cleared by the above as abandoned), it's not considered abandoned.
-        return vehicle_wp, False  # It's stopped for a legitimate traffic reason or moving
+        affected_by_traffic_light, _ = self._affected_by_traffic_light(vehicle, lights_list_for_vehicle) 
+        affected_by_stop_sign, _ = self._affected_by_sign(vehicle)
+
+        # Se il veicolo è direttamente influenzato da un semaforo o stop, è legittimamente fermo
+        if affected_by_traffic_light or affected_by_stop_sign:
+            self.logger.debug(f"Veicolo {vehicle.id} fermo a un semaforo o stop")
+            return vehicle_wp, False
+        
+        # NUOVO: Controlla se c'è un semaforo rosso più avanti nella stessa corsia
+        if get_speed(vehicle) < 0.5:  # Solo se il veicolo è praticamente fermo
+            next_wp = vehicle_wp
+            for i in range(10):  # Guarda avanti per circa 20-30m
+                next_wps = next_wp.next(3.0)
+                if not next_wps:
+                    break
+                next_wp = next_wps[0]
+                
+                # Controlla se c'è un semaforo rosso che influenza questo waypoint
+                for traffic_light in lights_list_for_vehicle:
+                    if traffic_light.state != carla.TrafficLightState.Red:
+                        continue
+                    
+                    # Ottieni i waypoint influenzati dal semaforo
+                    affecting_waypoints = traffic_light.get_affected_lane_waypoints()
+                    for wp in affecting_waypoints:
+                        # Se il waypoint influenzato è vicino al nostro waypoint proiettato
+                        if wp.road_id == next_wp.road_id and wp.lane_id == next_wp.lane_id:
+                            if next_wp.transform.location.distance(wp.transform.location) < 10.0:
+                                self.logger.debug(f"Veicolo {vehicle.id} in coda verso un semaforo rosso")
+                                return vehicle_wp, False  # È in coda a un semaforo, non è abbandonato
+
+        
+        # Logica originale
+        if get_speed(vehicle) < 0.1 and not vehicle_wp.is_junction:
+            return vehicle_wp, True  # È abbandonato/parcheggiato
+        
+        return vehicle_wp, False  # È fermo per una ragione legittima o in movimento
     
 
     def _affected_by_sign(self, vehicle , sign_type= "206", max_distance = None):
@@ -573,4 +581,4 @@ class BasicAgent(object):
 
         return False, None
 
-    
+

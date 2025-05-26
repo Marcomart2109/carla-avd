@@ -217,7 +217,7 @@ class LocalPlanner(object):
             self._waypoints_queue.append(elem)
 
         self._stop_waypoint_creation = stop_waypoint_creation
-        self._vehicle_controller.setWaypoints(self._waypoints_queue)
+        #self._vehicle_controller.setWaypoints(self._waypoints_queue)
 
     def run_step(self, debug=False):
         """
@@ -351,7 +351,7 @@ class LocalPlanner(object):
             self._waypoints_queue.append(wp)
     
         # Aggiorna anche il controller del veicolo
-        self._vehicle_controller.setWaypoints(self._waypoints_queue)
+        #self._vehicle_controller.setWaypoints(self._waypoints_queue)
      
         return complete_plan
 
